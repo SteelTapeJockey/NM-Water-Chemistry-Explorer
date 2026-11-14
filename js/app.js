@@ -1239,6 +1239,153 @@ const WQP_TYPE_COLORS = {'Stream':'#1f77b4', 'Lake, Reservoir, Impoundment':'#17
 const wqpColor = t => WQP_TYPE_COLORS[t] || '#999999';
 const wqp = {sites:null, byId:null, promise:null, at:null, allTypes:[], types:null, exGroups:new Set(), show:false};   // the map starts empty; turned on when the WQP tab is opened
 (()=>{ try{ const off = JSON.parse(ls.get('wq-wqp-types-off2') || '[]'); if(off.length) wqp.typesOff = new Set(off); }catch(e){} })();
+/* ---- individual parameters (WQP characteristic names). The New Mexico list (name, groups, sites, results) is embedded
+        (#wqp-params, or data/wqp-params.js in the folder version; built by build_wqp_params.py from WQP's period-of-record summaries) so search and the group lists
+        are instant; which sites measured a picked name comes live from the Station service, kept for a day. ---- */
+const WQPP = (()=>{ try{ return builtIn('wqp-params') || {at:'', g:[], p:[]}; }catch(e){ return {at:'', g:[], p:[]}; } })();
+const WQPP_BY = new Map(WQPP.p.map(r=>[r[0], r]));
+const wqppRes = r => { let t = 0; for(let i=1; i<r[2].length; i += 2) t += r[2][i]; return t; };
+const wqppNorm = s => String(s).toLowerCase().replace(/δ/g, 'd').replace(/[^a-z0-9]+/g, ' ').trim();
+// extra search words: common shorthand, and "isotope" for isotope names that WQP files outside Stable Isotopes
+const WQPP_ALIAS = [[/^tritium$/i, 'h3 3h h 3 tu isotope'], [/^deuterium/i, 'deuterium 2h d2h dd hydrogen 2 isotope'], [/^oxygen-18/i, '18o o18 d18o isotope'],
+  [/^carbon-14$/i, '14c c14 radiocarbon isotope'], [/^carbon-13/i, '13c d13c isotope'], [/^radon/i, 'rn isotope'], [/^radium/i, 'ra isotope'], [/^uranium-2|^thorium-2|^strontium-9/i, 'isotope']];
+const WQPP_GROUP = new Map(), WQPP_KEY = WQPP.p.map(r=>{
+  const gs = []; for(let i=0; i<r[2].length; i += 2){ const g = WQPP.g[r[2][i]]; gs.push(g); if(!WQPP_GROUP.has(g)) WQPP_GROUP.set(g, []); WQPP_GROUP.get(g).push([r[0], r[1], r[2][i+1]]); }
+  const al = WQPP_ALIAS.filter(([re])=>re.test(r[0])).map(a=>a[1]).join(' ');
+  return ' ' + wqppNorm(r[0] + ' ' + gs.join(' ') + ' ' + al + (gs.includes('Stable Isotopes') ? ' isotope' : '')) + ' ';
+});
+WQPP_GROUP.forEach(l=>l.sort((a,b)=>b[2] - a[2]));
+/* ---- reported aquifer (the aquifer and formation WQP lists for each well and spring; mostly USGS NWIS codes).
+        Not in the site list, so loaded on request from the Station service and kept for a day. ---- */
+const WQP_AQ_KEY = 'wqp-aquifers-v1';
+wqp.aq = null; wqp.aqSel = ''; wqp.aqBusy = false;
+async function wqpAqLoad(){
+  if(wqp.aq || wqp.aqBusy) return;
+  wqp.aqBusy = true; wqpAqUI('Loading aquifer designations for New Mexico wells and springs…');
+  try{
+    let d = await idbGet(WQP_AQ_KEY);
+    if(!d || !Array.isArray(d.s) || Date.now() - d.t > CACHE_TTL){
+      const u = WQP_BASE + '/Station/search?' + new URLSearchParams([['statecode', 'US:35'], ['siteType', 'Well'], ['siteType', 'Spring'], ['mimeType', 'csv'], ['zip', 'no']]);
+      const rows = WQPCore.parseCsv(await wqpFetch(u, 240000)), h = rows[0] || [];
+      const ix = k => h.indexOf(k), iId = ix('MonitoringLocationIdentifier'), iA = ix('AquiferName'), iF = ix('FormationTypeText'), iL = ix('LocalAqfrName');
+      if(iId < 0 || iA < 0) throw new Error('WQP did not return the aquifer columns');
+      const names = [], nIdx = new Map(), s = [];
+      const id = v => { v = String(v || '').trim(); if(!v) return -1; if(!nIdx.has(v)){ nIdx.set(v, names.length); names.push(v); } return nIdx.get(v); };
+      for(let i=1; i<rows.length; i++){
+        const r = rows[i], sid = r[iId]; if(!sid) continue;
+        const a = id(r[iA]), f = id((iF >= 0 && r[iF]) || (iL >= 0 && r[iL]) || '');
+        if(a >= 0 || f >= 0) s.push([sid, a, f]);
+      }
+      d = {t:Date.now(), names, s};
+      await idbSet(WQP_AQ_KEY, d);
+    }
+    wqp.aq = new Map(d.s.map(([sid, a, f])=>[sid, [a < 0 ? '' : d.names[a], f < 0 ? '' : d.names[f]]]));
+  }catch(e){ wqp.aqBusy = false; wqpAqUI('Could not load aquifer designations: ' + e.message, true); return; }
+  wqp.aqBusy = false; wqpRender(); wqpRedraw();
+}
+function wqpAqUI(msg, err){ const el = $('wqp-aq-hint'); el.textContent = msg; el.style.color = err ? 'var(--warn)' : ''; }
+// the site passes the aquifer choice ('' = any; 'f:<formation>' or 'a:<principal aquifer>')
+function wqpAqOk(q){
+  if(!wqp.aqSel || !wqp.aq) return true;
+  const r = wqp.aq.get(q.id); if(!r) return false;
+  return wqp.aqSel[0] === 'f' ? r[1] === wqp.aqSel.slice(2) : r[0] === wqp.aqSel.slice(2);
+}
+const wqpAqLabel = () => wqp.aqSel ? wqp.aqSel.slice(2) : '';
+function wqpAqRender(pool){
+  const sel = $('wqp-aq'), loaded = !!wqp.aq;
+  $('wqp-aq-load').hidden = loaded; sel.hidden = !loaded; $('wqp-aq-clear').hidden = !wqp.aqSel;
+  if(!loaded){ if(!wqp.aqBusy) wqpAqUI('The aquifer or formation WQP lists for each well and spring. Nearly all come from USGS; other organizations rarely give one. About 13 MB the first time, then kept in this browser for a day.'); return; }
+  const fc = new Map(), ac = new Map(); let n = 0;
+  for(const q of pool){ const r = wqp.aq.get(q.id); if(!r) continue; n++; if(r[1]) fc.set(r[1], (fc.get(r[1]) || 0) + 1); if(r[0]) ac.set(r[0], (ac.get(r[0]) || 0) + 1); }
+  const cur = wqp.aqSel, opts = (m, k) => { const e = [...m.entries()].sort((a,b)=>b[1] - a[1] || a[0].localeCompare(b[0])); if(cur && cur[0] === k && !m.has(cur.slice(2))) e.push([cur.slice(2), 0]); return e.map(([v, c])=>`<option value="${esc(k + ':' + v)}">${esc(v)} (${c.toLocaleString()})</option>`).join(''); };
+  sel.innerHTML = `<option value="">Any aquifer (${n.toLocaleString()} of ${pool.length.toLocaleString()} sites have one)</option><optgroup label="Local aquifer or formation">${opts(fc, 'f')}</optgroup><optgroup label="Principal aquifer">${opts(ac, 'a')}</optgroup>`;
+  sel.value = cur;
+  wqpAqUI(cur ? 'Only sites WQP lists in ' + wqpAqLabel() + '. Sites with no designation are left out while this is set.' : 'Counts are sites in the current selection. Choosing one limits the map, the site count and the download.');
+}
+$('wqp-aq-load').onclick = wqpAqLoad;
+$('wqp-aq').addEventListener('change', e=>{ wqp.aqSel = e.target.value; wqpRender(); wqpRedraw(); });
+$('wqp-aq-clear').onclick = ()=>{ wqp.aqSel = ''; wqpRender(); wqpRedraw(); };
+const WQPP_SITES_KEY = 'wqp-param-sites-v1:';
+wqp.picks = new Map(); wqp.open = new Set(); wqp.openAll = new Set(); wqp.picksOnly = ls.get('wq-wqp-picks-only') !== 'off';
+$('wqp-picks-only').checked = wqp.picksOnly;
+(()=>{ try{ for(const n of JSON.parse(ls.get('wq-wqp-picks') || '[]')) wqp.picks.set(n, {sites:null, err:null}); }catch(e){} })();
+async function wqpPickLoad(name){
+  const v = wqp.picks.get(name); if(!v || v.busy) return;
+  v.busy = true; v.err = null;
+  try{
+    let c = await idbGet(WQPP_SITES_KEY + name);
+    if(!c || !Array.isArray(c.ids) || Date.now() - c.t > CACHE_TTL){
+      const u = WQP_BASE + '/Station/search?' + new URLSearchParams({statecode:'US:35', characteristicName:name, sampleMedia:'Water', mimeType:'csv', zip:'no'});
+      const rows = WQPCore.parseCsv(await wqpFetch(u, 180000)), ix = rows.length ? rows[0].indexOf('MonitoringLocationIdentifier') : -1;
+      c = {t:Date.now(), ids:ix < 0 ? [] : rows.slice(1).map(r=>r[ix]).filter(Boolean)};
+      idbSet(WQPP_SITES_KEY + name, c);
+    }
+    v.sites = new Set(c.ids);
+  }catch(e){ v.err = e.message || 'WQP did not answer'; }
+  v.busy = false;
+  if(wqp.picks.get(name) === v){ wqpRender(); wqpRedraw(); wqpSearchRender(); }
+}
+function wqpPicksSave(){ ls.set('wq-wqp-picks', JSON.stringify([...wqp.picks.keys()])); }
+function wqpPick(name, on){
+  if(on && !wqp.picks.has(name)){ wqp.picks.set(name, {sites:null, err:null}); wqpPickLoad(name); }
+  else if(!on) wqp.picks.delete(name);
+  wqpPicksSave(); wqpRender(); wqpRedraw(); wqpSearchRender();
+}
+const wqpPicksPending = () => [...wqp.picks.values()].some(v=>!v.sites && !v.err);
+// sites that measured any picked parameter, or null when not filtering by parameter
+function wqpPickSet(){
+  if(!wqp.picksOnly || !wqp.picks.size) return null;
+  const u = new Set(); for(const v of wqp.picks.values()) if(v.sites) v.sites.forEach(id=>u.add(id));
+  return u;
+}
+const wqpBase = () => wqp.sites ? wqp.sites.filter(q=>wqp.types.has(q.t) && inArea(q) && wqpAqOk(q)) : [];
+// search box: the NM list first; when it has few matches, WQP's full list of names (fetched once) fills in
+let wqpAllNames = null, wqpAllNamesP = null;
+function wqpLoadAllNames(){
+  if(wqpAllNamesP) return wqpAllNamesP;
+  wqpAllNamesP = wqpFetch('https://www.waterqualitydata.us/Codes/characteristicname?mimeType=json', 60000)
+    .then(t=>{ wqpAllNames = (JSON.parse(t).codes || []).map(c=>c.value).filter(n=>n && !WQPP_BY.has(n)).map(n=>[n, ' ' + wqppNorm(n) + ' ']); wqpSearchRender(); })
+    .catch(()=>{ wqpAllNames = []; });
+  return wqpAllNamesP;
+}
+// matches a search against the NM list, ranked; when it finds fewer than 5, WQP's full list of names (fetched once) fills in.
+// extra is null while that list is still loading.
+function wqppFind(qv, limit){
+  const nq = wqppNorm(qv); if(!nq) return null;
+  const toks = nq.split(' '), hits = [];
+  for(let i=0; i<WQPP.p.length; i++){ const k = WQPP_KEY[i]; if(toks.every(t=>k.includes(t))) hits.push(WQPP.p[i]); }
+  const score = r => { const n = wqppNorm(r[0]); return n === nq ? 0 : n.startsWith(nq) ? 1 : (' ' + n).includes(' ' + toks[0]) ? 2 : 3; };
+  hits.sort((a,b)=>score(a) - score(b) || b[1] - a[1]);
+  let extra = [];
+  if(hits.length < 5){ if(!wqpAllNames){ wqpLoadAllNames(); extra = null; } else extra = wqpAllNames.filter(([, k])=>toks.every(t=>k.includes(t))).slice(0, 25).map(e=>e[0]); }
+  return {total:hits.length, hits:hits.slice(0, limit || 60), extra};
+}
+const wqppGroupLabel = r => WQPP.g[r[2][0]] + (r[2].length > 2 ? ' +' + (r[2].length/2 - 1) : '');
+let wqpHits = [];
+function wqpSearchRender(){
+  const el = $('wqp-search-res'), f = wqppFind($('wqp-search').value);
+  if(!f){ el.hidden = true; el.innerHTML = ''; wqpHits = []; return; }
+  const row = (n, gk, cnt) => { const on = wqp.picks.has(n); return `<label class="wrow${on ? ' picked' : ''}"><input type="checkbox" data-wn="${esc(n)}" ${on ? 'checked' : ''}><span class="k" title="${esc(n)}">${esc(n)}</span><span class="gk" title="${esc(gk)}">${esc(gk)}</span><span class="n">${cnt}</span></label>`; };
+  let html = f.hits.map(r=>row(r[0], wqppGroupLabel(r), r[1].toLocaleString() + ' sites')).join('');
+  if(f.total > f.hits.length) html += `<div class="wrow more"><span class="hint" style="margin:0">${(f.total - f.hits.length).toLocaleString()} more. Add a word to narrow the search.</span></div>`;
+  wqpHits = f.hits.map(r=>r[0]);
+  if(f.extra === null){ if(!f.hits.length) html = '<div class="wrow more"><span class="hint" style="margin:0">Searching WQP\'s full list of names…</span></div>'; }
+  else if(f.extra.length){ html += `<div class="wrow more"><span class="hint" style="margin:0">Not in the New Mexico list (as of ${esc(WQPP.at)}). Picking one checks WQP live.</span></div>` + f.extra.map(n=>row(n, 'no NM results listed', '–')).join(''); wqpHits = wqpHits.concat(f.extra); }
+  if(!html) html = '<div class="wrow more"><span class="hint" style="margin:0">No WQP parameter names match.</span></div>';
+  el.innerHTML = html; el.hidden = false;
+}
+$('wqp-search').addEventListener('input', wqpSearchRender);
+$('wqp-search').addEventListener('keydown', e=>{
+  if(e.key === 'Enter'){ e.preventDefault(); const n = wqpHits.find(n=>!wqp.picks.has(n)); if(n) wqpPick(n, true); }
+  else if(e.key === 'Escape'){ e.target.value = ''; wqpSearchRender(); }
+});
+$('wqp-search-res').addEventListener('change', e=>{ const n = e.target.dataset.wn; if(n != null) wqpPick(n, e.target.checked); });
+$('wqp-picks').addEventListener('click', e=>{
+  const x = e.target.closest('[data-unpick]'); if(x){ wqpPick(x.dataset.unpick, false); return; }
+  const r = e.target.closest('[data-retry]'); if(r){ const v = wqp.picks.get(r.dataset.retry); if(v){ v.err = null; wqpRender(); wqpPickLoad(r.dataset.retry); } }
+});
+$('wqp-picks-clear').onclick = ()=>{ wqp.picks.clear(); wqpPicksSave(); wqpRender(); wqpRedraw(); wqpSearchRender(); };
+$('wqp-picks-only').addEventListener('change', e=>{ wqp.picksOnly = e.target.checked; ls.set('wq-wqp-picks-only', wqp.picksOnly ? 'on' : 'off'); wqpRender(); wqpRedraw(); });
 $('wqp-show').checked = wqp.show;
 let wqpOpened = false;
 function wqpOpen(){ if(!wqpOpened && ls.get('wq-wqp-show') !== 'off'){ wqp.show = true; $('wqp-show').checked = true; } wqpOpened = true; wqpEnsure().catch(()=>{}); }
@@ -1268,17 +1415,19 @@ async function wqpEnsure(){
     const cnt = new Map(); d.sites.forEach(q=>cnt.set(q.t, (cnt.get(q.t)||0) + 1));
     wqp.allTypes = [...cnt.keys()].sort((a,b)=>cnt.get(b) - cnt.get(a));
     wqp.types = new Set(wqp.allTypes.filter(t=>!(wqp.typesOff && wqp.typesOff.has(t))));
+    for(const [n, v] of wqp.picks) if(!v.sites) wqpPickLoad(n);
     wqpRender(); wqpRedraw();
     return wqp.sites;
   })().catch(e=>{ wqp.promise = null; $('wqp-status').textContent = 'Could not load the WQP site list: ' + e.message; throw e; });
   return wqp.promise;
 }
-const wqpSel = () => wqp.sites ? wqp.sites.filter(q=>wqp.types.has(q.t) && inArea(q)) : [];
+const wqpSel = () => { if(!wqp.sites) return []; const ps = wqpPickSet(); return wqp.sites.filter(q=>wqp.types.has(q.t) && inArea(q) && (!ps || ps.has(q.id)) && wqpAqOk(q)); };
 function wqpGroupsOf(sel){ const m = new Map(); for(const q of sel) for(const g in q.g) m.set(g, (m.get(g)||0) + (+q.g[g] || 0)); return m; }
 function wqpRedraw(){
   if(!wqp.sites || !wqp.show){ wqpPoints.setData([]); return; }
   const items = [];
-  for(const q of wqp.sites) if(wqp.types.has(q.t)) items.push({w:q, c:wqpColor(q.t), ring:true, dim:!!state.area && !inArea(q)});
+  const ps = wqpPickSet();
+  for(const q of wqp.sites) if(wqp.types.has(q.t) && (!ps || ps.has(q.id)) && wqpAqOk(q)) items.push({w:q, c:wqpColor(q.t), ring:true, dim:!!state.area && !inArea(q)});
   items.sort((a,b)=>(b.dim ? 1 : 0) - (a.dim ? 1 : 0));
   wqpPoints.setData(items); renderWqpLegend();
 }
@@ -1286,10 +1435,16 @@ function renderWqpLegend(){
   const el = $('legend-wqp'); if(!el) return;
   if(!wqp.sites || !wqp.show){ el.innerHTML = ''; return; }
   const sel = wqpSel(), cnt = new Map(); sel.forEach(q=>cnt.set(q.t, (cnt.get(q.t)||0) + 1));
-  el.innerHTML = '<div class="lg-sep"></div><h5>WQP sites</h5>' + wqp.allTypes.filter(t=>wqp.types.has(t) && cnt.get(t)).map(t=>`<div class="lg-row"><span class="ring" style="border-color:${wqpColor(t)}"></span><span class="k">${esc(t)}</span><span class="n">${(cnt.get(t)||0).toLocaleString()}</span></div>`).join('') + (state.area ? '<div class="lg-note">Counts are inside ' + esc(state.area.name) + '; sites outside are faded.</div>' : '');
+  el.innerHTML = '<div class="lg-sep"></div><h5>WQP sites</h5>' + wqp.allTypes.filter(t=>wqp.types.has(t) && cnt.get(t)).map(t=>`<div class="lg-row"><span class="ring" style="border-color:${wqpColor(t)}"></span><span class="k">${esc(t)}</span><span class="n">${(cnt.get(t)||0).toLocaleString()}</span></div>`).join('') + (wqpPickSet() ? '<div class="lg-note">Only sites that measured ' + esc([...wqp.picks.keys()].join(', ')) + '.</div>' : '') + (wqp.aqSel ? '<div class="lg-note">Only sites WQP lists in ' + esc(wqpAqLabel()) + '.</div>' : '') + (state.area ? '<div class="lg-note">Counts are inside ' + esc(state.area.name) + '; sites outside are faded.</div>' : '');
 }
 // estimated download size for the current selection (results, all years, minus unticked groups)
-function wqpEstimate(sel){ let r = 0; for(const q of sel){ let n = q.r; for(const g of wqp.exGroups) n -= (+q.g[g] || 0); r += Math.max(0, n); } return r; }
+function wqpEstimate(sel){
+  if(wqp.picks.size){   // picked names: NM results for the name, scaled by the share of its sites in the selection
+    let r = 0;
+    for(const [n, v] of wqp.picks){ if(!v.sites) continue; const k = sel.reduce((t,q)=>t + (v.sites.has(q.id) ? 1 : 0), 0); if(!k) continue; const d = WQPP_BY.get(n); r += d && d[1] ? Math.max(k, Math.round(wqppRes(d) * k / d[1])) : k*3; }
+    return r;
+  }
+  let r = 0; for(const q of sel){ let n = q.r; for(const g of wqp.exGroups) n -= (+q.g[g] || 0); r += Math.max(0, n); } return r; }
 const fmtMB = rows => { const mb = rows*350/1048576; return mb >= 1024 ? (mb/1024).toFixed(1) + ' GB' : mb >= 10 ? Math.round(mb) + ' MB' : mb.toFixed(1) + ' MB'; };
 function wqpRender(){
   wqpBtnLabel();
@@ -1297,19 +1452,46 @@ function wqpRender(){
   const sel = wqpSel(), name = state.area ? state.area.name : 'All of New Mexico';
   const res = sel.reduce((t,q)=>t + q.r, 0), act = sel.reduce((t,q)=>t + q.a, 0);
   $('wqp-sel-n').textContent = sel.length.toLocaleString() + ' WQP site' + (sel.length === 1 ? '' : 's');
-  $('wqp-sel-lbl').textContent = name + ' · ' + res.toLocaleString() + ' water results · ' + act.toLocaleString() + ' sampling events, all years';
+  const pnames = [...wqp.picks.keys()], ps = wqpPickSet();
+  $('wqp-sel-lbl').textContent = name + (ps ? ' · sites that measured ' + (pnames.length > 2 ? pnames.length + ' picked parameters' : pnames.join(' or ')) + (wqpPicksPending() ? ' (still checking WQP…)' : '') : '') + (wqp.aqSel ? ' · reported aquifer: ' + wqpAqLabel() : '') + ' · ' + res.toLocaleString() + ' water results · ' + act.toLocaleString() + ' sampling events, all years';
   $('wqp-status').textContent = wqp.sites.length.toLocaleString() + ' NM monitoring locations, as of ' + new Date(wqp.at).toLocaleDateString() + '. Pick the area in the right-hand drawer.';
+  { const ps2 = wqpPickSet(); wqpAqRender(wqp.sites.filter(q=>wqp.types.has(q.t) && inArea(q) && (!ps2 || ps2.has(q.id)))); }
   // site types, counted inside the area
   const inA = wqp.sites.filter(q=>inArea(q)), tc = new Map(); inA.forEach(q=>tc.set(q.t, (tc.get(q.t)||0) + 1));
   $('wqp-types').innerHTML = wqp.allTypes.slice().sort((a,b)=>(tc.get(b)||0) - (tc.get(a)||0)).map(t=>`<label class="wrow${tc.get(t) ? '' : ' zero'}"><input type="checkbox" data-wt="${esc(t)}" ${wqp.types.has(t) ? 'checked' : ''}><span class="ring" style="border-color:${wqpColor(t)}"></span><span class="k">${esc(t)}</span><span class="n">${(tc.get(t)||0).toLocaleString()}</span></label>`).join('');
   // parameter groups for the selected sites
   const gm = wqpGroupsOf(sel), gs = [...gm.entries()].sort((a,b)=>b[1] - a[1]);
-  $('wqp-groups').innerHTML = gs.length ? gs.map(([g, n])=>`<label class="wrow"><input type="checkbox" data-wg="${esc(g)}" ${wqp.exGroups.has(g) ? '' : 'checked'}><span class="k" title="${esc(g)}">${esc(g)}</span><span class="n">${n.toLocaleString()}</span></label>`).join('') : '<p class="hint" style="margin:8px">No WQP water results for these sites.</p>';
+  const locked = wqp.picks.size > 0, ge = $('wqp-groups'), keep = ge.scrollTop;
+  ge.classList.toggle('locked', locked);
+  ge.innerHTML = gs.length ? gs.map(([g, n])=>{
+    const names = WQPP_GROUP.get(g) || [], open = wqp.open.has(g);
+    let h = `<label class="wrow">${names.length ? `<span class="car" role="button" tabindex="0" data-gx="${esc(g)}" aria-expanded="${open}" title="${open ? 'Hide' : 'Show'} the ${names.length.toLocaleString()} parameters in this group">▶</span>` : '<span class="car"></span>'}<input type="checkbox" data-wg="${esc(g)}" ${wqp.exGroups.has(g) ? '' : 'checked'} ${locked ? 'disabled' : ''}><span class="k" title="${esc(g)}">${esc(g)}</span><span class="n">${n.toLocaleString()}</span></label>`;
+    if(open){
+      const all = wqp.openAll.has(g), show = all ? names : names.slice(0, 40);
+      h += show.map(([nm, s])=>{ const on = wqp.picks.has(nm); return `<label class="wrow sub${on ? ' picked' : ''}"><input type="checkbox" data-wn="${esc(nm)}" ${on ? 'checked' : ''}><span class="k" title="${esc(nm)}">${esc(nm)}</span><span class="n">${s.toLocaleString()} sites</span></label>`; }).join('');
+      if(names.length > show.length) h += `<div class="wrow more"><button class="linkbtn" data-gall="${esc(g)}">Show all ${names.length.toLocaleString()}</button></div>`;
+    }
+    return h;
+  }).join('') : '<p class="hint" style="margin:8px">No WQP water results for these sites.</p>';
+  ge.scrollTop = keep;
+  $('wqp-groups-hint').innerHTML = locked
+    ? 'Downloading only the picked parameters, so the group ticks are set aside. Clear the picks to go back to groups.'
+    : 'Water results per parameter group in this selection, all years. Untick a group to leave it out of the download. ▶ lists the parameters in a group (site counts are statewide, as of ' + esc(WQPP.at) + '), or search above. Picking parameters downloads only those.';
+  // picked parameters
+  $('wqp-picks-box').hidden = !wqp.picks.size;
+  if(wqp.picks.size){
+    const base = wqpBase();
+    $('wqp-picks').innerHTML = [...wqp.picks].map(([n, v])=>{
+      const k = v.sites ? base.reduce((t,q)=>t + (v.sites.has(q.id) ? 1 : 0), 0) : 0;
+      const info = v.err ? `<small class="err" data-retry="${esc(n)}" title="${esc(v.err)}">couldn't check · retry</small>` : !v.sites ? '<small>checking…</small>' : `<small title="Sites in this selection / all NM sites with water results for this parameter">${k.toLocaleString()}${state.area || wqp.types.size < wqp.allTypes.length ? ' of ' + v.sites.size.toLocaleString() : ''} sites</small>`;
+      return `<span class="wq-pick"><span class="nm" title="${esc(n)}">${esc(n)}</span>${info}<button data-unpick="${esc(n)}" title="Remove" aria-label="Remove ${esc(n)}">×</button></span>`;
+    }).join('');
+  }
   // download button
   if(!dlBusy){
     const est = wqpEstimate(sel), mode = sel.length <= WQP_GET_MAX ? 'get' : sel.length <= WQP_POST_MAX ? 'post' : 'area';
     $('wqp-dl').disabled = !sel.length || !est;
-    $('wqp-dl').textContent = sel.length ? 'Download ' + (wqp.exGroups.size ? 'selected parameters' : 'all results') + ' for ' + sel.length.toLocaleString() + ' site' + (sel.length === 1 ? '' : 's') : 'No sites selected';
+    $('wqp-dl').textContent = sel.length ? 'Download ' + (pnames.length === 1 ? pnames[0] : pnames.length ? pnames.length + ' picked parameters' : wqp.exGroups.size ? 'selected groups' : 'all results') + ' for ' + sel.length.toLocaleString() + ' site' + (sel.length === 1 ? '' : 's') : 'No sites selected';
     $('wqp-dl-hint').textContent = !sel.length ? '' : 'About ' + est.toLocaleString() + ' results (≈' + fmtMB(est) + ') before any date limit. ' + (mode === 'get' ? 'WQP builds the file and your browser downloads it directly.' : mode === 'post' ? 'Fetched in batches of ' + WQP_POST_BATCH + ' sites (smaller batches if WQP is slow), then saved as one CSV.' : 'Queried by area and date range and ' + (('showSaveFilePicker' in window) ? 'written straight to a file you choose as it arrives.' : 'held in memory, then saved. Chrome or Edge can stream large downloads straight to disk instead.'));
   }
 }
@@ -1318,22 +1500,68 @@ function wqpSaveTypes(){ ls.set('wq-wqp-types-off2', JSON.stringify(wqp.allTypes
 $('wqp-types').addEventListener('change', e=>{ const t = e.target.dataset.wt; if(t == null) return; e.target.checked ? wqp.types.add(t) : wqp.types.delete(t); wqpSaveTypes(); wqpRender(); wqpRedraw(); });
 $('wqp-types-all').onclick = ()=>{ if(!wqp.sites) return; wqp.types = new Set(wqp.allTypes); wqpSaveTypes(); wqpRender(); wqpRedraw(); };
 $('wqp-types-none').onclick = ()=>{ if(!wqp.sites) return; wqp.types = new Set(); wqpSaveTypes(); wqpRender(); wqpRedraw(); };
-$('wqp-groups').addEventListener('change', e=>{ const g = e.target.dataset.wg; if(g == null) return; e.target.checked ? wqp.exGroups.delete(g) : wqp.exGroups.add(g); wqpRender(); });
+$('wqp-groups').addEventListener('change', e=>{
+  const n = e.target.dataset.wn; if(n != null){ wqpPick(n, e.target.checked); return; }
+  const g = e.target.dataset.wg; if(g == null) return; e.target.checked ? wqp.exGroups.delete(g) : wqp.exGroups.add(g); wqpRender();
+});
+$('wqp-groups').addEventListener('click', e=>{
+  const b = e.target.closest('[data-gx]'); if(b){ e.preventDefault(); const g = b.dataset.gx; wqp.open.has(g) ? wqp.open.delete(g) : wqp.open.add(g); wqpRender(); return; }
+  const a = e.target.closest('[data-gall]'); if(a){ e.preventDefault(); wqp.openAll.add(a.dataset.gall); wqpRender(); }
+});
+$('wqp-groups').addEventListener('keydown', e=>{ const b = e.target.closest('[data-gx]'); if(b && (e.key === 'Enter' || e.key === ' ')){ e.preventDefault(); b.click(); setTimeout(()=>{ const n = $('wqp-groups').querySelector('[data-gx="' + CSS.escape(b.dataset.gx) + '"]'); if(n) n.focus(); }); } });
 $('wqp-groups-all').onclick = ()=>{ wqp.exGroups.clear(); wqpRender(); };
 $('wqp-groups-none').onclick = ()=>{ wqpGroupsOf(wqpSel()).forEach((n, g)=>wqp.exGroups.add(g)); wqpRender(); };
 
+// aquifer and construction details for a WQP well or spring (the Station CSV has them, the site list does not); fetched when a popup opens
+const wqpWellCache = new Map();
+function wqpWellInfo(id){
+  if(wqpWellCache.has(id)) return wqpWellCache.get(id);
+  const pr = wqpFetch(WQP_BASE + '/Station/search?' + new URLSearchParams({siteid:id, mimeType:'csv', zip:'no'}), 30000).then(t=>{
+    const rows = WQPCore.parseCsv(t); if(rows.length < 2) return null;
+    const h = rows[0], r = rows[1], g = k => { const i = h.indexOf(k); return i < 0 ? '' : String(r[i] == null ? '' : r[i]).trim(); };
+    return {aq:g('AquiferName'), form:g('FormationTypeText'), local:g('LocalAqfrName'), type:g('AquiferTypeName'), depth:g('WellDepthMeasure/MeasureValue'), depthU:g('WellDepthMeasure/MeasureUnitCode'),
+      hole:g('WellHoleDepthMeasure/MeasureValue'), holeU:g('WellHoleDepthMeasure/MeasureUnitCode'), built:g('ConstructionDateText')};
+  });
+  pr.catch(()=>wqpWellCache.delete(id));
+  wqpWellCache.set(id, pr); return pr;
+}
+const wqpBuilt = s => /^\d{8}$/.test(s) ? s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6) : /^\d{6}$/.test(s) ? s.slice(0, 4) + '-' + s.slice(4) : s;
+function wqpFillWell(q){
+  const box = () => { const e = document.getElementById('wqp-pop-well'); return e && e.dataset.id === q.id ? e : null; };
+  wqpWellInfo(q.id).then(w=>{
+    const e = box(); if(!e) return;
+    const rows = [];
+    if(w){
+      if(w.form || w.local) rows.push(['Aquifer / formation', w.form || w.local]);
+      if(w.aq) rows.push(['Principal aquifer', w.aq]);
+      if(w.type) rows.push(['Aquifer type', w.type]);
+      if(w.depth) rows.push(['Well depth', fmt(+w.depth) + ' ' + (w.depthU || '')]);
+      if(w.hole && w.hole !== w.depth) rows.push(['Hole depth', fmt(+w.hole) + ' ' + (w.holeU || '')]);
+      if(w.built) rows.push(['Constructed', wqpBuilt(w.built)]);
+    }
+    e.innerHTML = rows.length ? '<table>' + rows.map(([k, v])=>`<tr><td class="k">${esc(k)}</td><td style="text-align:left">${esc(v)}</td></tr>`).join('') + '</table>'
+      : '<span class="hint">WQP lists no aquifer or construction details for this site.</span>';
+  }).catch(()=>{ const e = box(); if(e) e.innerHTML = '<span class="hint">Could not load the well details from WQP.</span>'; });
+}
 function openWqpPopup(q, group){
   const gs = Object.entries(q.g).sort((a,b)=>b[1] - a[1]);
   const w = byKey.get('WQP:' + q.id) || byKey.get(WQP_SRC + ':' + q.id) || USGS_IDX.get(q.id);
   const csvUrl = WQP_BASE + '/Result/search?' + new URLSearchParams({siteid:q.id, sampleMedia:'Water', mimeType:'csv', zip:'no'});
   const browse = 'https://www.waterqualitydata.us/#siteid=' + encodeURIComponent(q.id) + '&mimeType=csv';
   const others = (group || []).filter(o=>o !== q).slice(0, 6);
+  const pk = [...wqp.picks].filter(([, v])=>v.sites && v.sites.has(q.id)).map(([n])=>n);
+  const gwSite = WQP_GW_TYPES.includes(q.f) || /well|spring/i.test(q.t || '');
+  const usgsPage = /^USGS-\d{8,15}$/.test(q.id) ? 'https://waterdata.usgs.gov/monitoring-location/' + q.id + '/' : '';
+  const pkUrl = pk.length ? WQP_BASE + '/Result/search?' + (()=>{ const u = new URLSearchParams({siteid:q.id, sampleMedia:'Water', mimeType:'csv', zip:'no'}); pk.forEach(n=>u.append('characteristicName', n)); return u; })() : '';
   const html = `<div class="pop"><h6>${esc(q.n || q.id)}</h6><div class="sub">${esc(q.mt || q.t)} · ${esc(q.id)}<br>${esc(q.orgN || q.org)} (${esc(q.prov)})${q.county ? ' · ' + esc(q.county) : ''}${q.huc ? ' · HUC ' + esc(q.huc) : ''}</div>
     <table><tr><td class="k">Water results</td><td class="v">${q.r.toLocaleString()}</td></tr><tr><td class="k">Sampling events</td><td class="v">${q.a.toLocaleString()}</td></tr></table>
     <div class="poph">Results by parameter group</div><table>${gs.map(([g, n])=>`<tr><td>${esc(g)}</td><td class="v">${(+n).toLocaleString()}</td></tr>`).join('') || '<tr><td>none listed</td></tr>'}</table>
     ${others.length ? '<div class="poph">Also here</div>' + others.map(o=>`<div class="pick"><span>${esc(o.n || o.id)} <small style="color:var(--muted)">${esc(o.t)} · ${o.r.toLocaleString()} results</small></span><button class="btn small" data-act="wqp" data-k="${esc(o.id)}">Open</button></div>`).join('') : ''}
-    <div class="actions"><a class="btn small primary" style="text-decoration:none" href="${esc(csvUrl)}" target="_blank" rel="noopener">Results CSV ↗</a><a class="btn small" style="text-decoration:none" href="${esc(browse)}" target="_blank" rel="noopener">Browse on WQP ↗</a>${q.url ? `<a class="btn small" style="text-decoration:none" href="${esc(q.url)}" target="_blank" rel="noopener">Site page ↗</a>` : ''}${w && Object.keys(w.a).length ? `<button class="btn small" data-act="well" data-k="${esc(w.k)}">Chemistry history</button>` : ''}</div></div>`;
+    ${pk.length ? '<div class="poph">Picked parameters measured here</div><div style="font-size:12px">' + pk.map(esc).join(', ') + '</div>' : ''}
+    ${gwSite ? `<div class="poph">Aquifer and construction</div><div id="wqp-pop-well" data-id="${esc(q.id)}" style="font-size:12px"><span class="hint">Loading from WQP…</span></div>` : ''}
+    <div class="actions">${pk.length ? `<a class="btn small primary" style="text-decoration:none" href="${esc(pkUrl)}" target="_blank" rel="noopener">${pk.length === 1 ? esc(pk[0]) : 'Picked'} CSV ↗</a>` : ''}<a class="btn small${pk.length ? '' : ' primary'}" style="text-decoration:none" href="${esc(csvUrl)}" target="_blank" rel="noopener">${pk.length ? 'All results' : 'Results'} CSV ↗</a><a class="btn small" style="text-decoration:none" href="${esc(browse)}" target="_blank" rel="noopener">Browse on WQP ↗</a>${q.url ? `<a class="btn small" style="text-decoration:none" href="${esc(q.url)}" target="_blank" rel="noopener">Site page ↗</a>` : ''}${usgsPage ? `<a class="btn small" style="text-decoration:none" href="${esc(usgsPage)}" target="_blank" rel="noopener" title="USGS Water Data for the Nation: water levels and other data for this site">USGS page ↗</a>` : ''}${w && Object.keys(w.a).length ? `<button class="btn small" data-act="well" data-k="${esc(w.k)}">Chemistry history</button>` : ''}</div></div>`;
   popup = L.popup({maxWidth:360, minWidth:280, autoPanPadding:[30,30]}).setLatLng([q.lat, q.lng]).setContent(html).openOn(map);
+  if(gwSite) wqpFillWell(q);
 }
 
 /* ---- downloading every result: same three strategies as the WQP polygon downloader ---- */
@@ -1372,7 +1600,8 @@ function wqpResultParams(){
   const p = new URLSearchParams({sampleMedia:'Water', mimeType:'csv', zip:'no', sorted:'no'});
   const from = $('wqp-from').value, to = $('wqp-to').value;
   if(from) p.set('startDateLo', WQPCore.mdy(from)); if(to) p.set('startDateHi', WQPCore.mdy(to));
-  if(wqp.exGroups.size) [...wqpGroupsOf(wqpSel()).keys()].filter(g=>!wqp.exGroups.has(g)).forEach(g=>p.append('characteristicType', g));
+  if(wqp.picks.size) [...wqp.picks.keys()].forEach(n=>p.append('characteristicName', n));
+  else if(wqp.exGroups.size) [...wqpGroupsOf(wqpSel()).keys()].filter(g=>!wqp.exGroups.has(g)).forEach(g=>p.append('characteristicType', g));
   return p;
 }
 // WQP ignores filters in the query string of a POST: they go in the JSON body (dates as strings, lists as arrays)
@@ -1381,10 +1610,11 @@ function wqpPostBody(ids){
   if(p.get('startDateLo')) b.startDateLo = p.get('startDateLo');
   if(p.get('startDateHi')) b.startDateHi = p.get('startDateHi');
   const ct = p.getAll('characteristicType'); if(ct.length) b.characteristicType = ct;
+  const cn = p.getAll('characteristicName'); if(cn.length) b.characteristicName = cn;
   return JSON.stringify(b);
 }
 const dlProg = (msg, err) => { const el = $('wqp-dl-progress'); el.textContent = msg; el.style.color = err ? 'var(--warn)' : ''; };
-function dlName(n){ return 'wqp_results_' + slug(state.area ? state.area.name : 'new_mexico') + '_' + n + 'sites_' + new Date().toISOString().slice(0, 10) + '.csv'; }
+function dlName(n){ const pn = [...wqp.picks.keys()]; return 'wqp_' + (pn.length === 1 ? slug(pn[0]) : pn.length ? pn.length + '_parameters' : 'results') + '_' + slug(state.area ? state.area.name : 'new_mexico') + '_' + n + 'sites_' + new Date().toISOString().slice(0, 10) + '.csv'; }
 // opens a file to stream into (Chrome/Edge), or collects in memory
 async function openSink(name, estRows){
   if('showSaveFilePicker' in window){
@@ -1405,7 +1635,10 @@ async function wqpDownload(){
   const sel = wqpSel(); if(!sel.length){ toast('No WQP sites in this selection.'); return; }
   const from = $('wqp-from').value, to = $('wqp-to').value;
   if(from && to && from > to){ toast('The start date is after the end date.'); return; }
-  if(wqp.exGroups.size && ![...wqpGroupsOf(sel).keys()].some(g=>!wqp.exGroups.has(g))){ toast('Tick at least one parameter group.'); return; }
+  if(wqpPicksPending()){ toast('Still checking which sites measured the picked parameters.'); return; }
+  const bad = [...wqp.picks].filter(([, v])=>v.err).map(([n])=>n);
+  if(bad.length){ toast('WQP could not be checked for ' + bad.join(', ') + '. Retry or remove ' + (bad.length === 1 ? 'it' : 'them') + ' first.', 4200); return; }
+  if(!wqp.picks.size && wqp.exGroups.size && ![...wqpGroupsOf(sel).keys()].some(g=>!wqp.exGroups.has(g))){ toast('Tick at least one parameter group.'); return; }
   const est = wqpEstimate(sel), ids = sel.map(q=>q.id);
   if(est > 750000 && Date.now() - dlConfirmAt > 10000){ dlConfirmAt = Date.now(); $('wqp-dl').textContent = 'About ' + est.toLocaleString() + ' results (≈' + fmtMB(est) + '). Click again to start'; return; }
   dlConfirmAt = 0;
@@ -2088,26 +2321,27 @@ const XP_PARAMS = [
   {k:'alpha', label:'Gross alpha', wqp:['Gross alpha radioactivity, (excluding radon and uranium)', 'Gross alpha radioactivity, including radon and uranium'], ccr:/gross alpha/i}
 ];
 const XP_BY = new Map(XP_PARAMS.map(p=>[p.k, p]));
-const XP_COLS = ['parameter', 'record_type', 'activity_type', 'source', 'provider', 'organization', 'site_id', 'site_name', 'site_type', 'water_source', 'latitude', 'longitude', 'county', 'huc8', 'huc8_name', 'aquifer', 'reported_aquifer', 'well_depth_ft',
-  'pws_id', 'system_name', 'pws_source_name', 'pws_match', 'sample_date', 'sample_year', 'sample_time', 'result_as_reported', 'censored', 'value', 'unit', 'value_mg_L', 'conversion_note', 'detection_limit', 'detection_limit_unit', 'fraction', 'speciation',
-  'standard_mg_L', 'standard_type', 'exceeds_standard', 'also_reported_by', 'ccr_year', 'ccr_range_low', 'ccr_range_high', 'method', 'result_status', 'qualifier', 'sample_id', 'sample_media', 'source_parameter_name', 'link'];
+const XP_COLS = ['parameter', 'record_type', 'activity_type', 'source', 'provider', 'organization', 'site_id', 'site_name', 'site_type', 'water_source', 'latitude', 'longitude', 'county', 'huc8', 'huc8_name', 'aquifer', 'reported_aquifer', 'reported_formation', 'well_depth_ft',
+  'pws_id', 'system_name', 'pws_source_name', 'pws_match', 'sample_date', 'sample_year', 'sample_time', 'result_as_reported', 'censored', 'value', 'unit', 'value_mg_L', 'stat_value', 'stat_unit', 'conversion_note', 'detection_limit', 'detection_limit_unit', 'fraction', 'speciation',
+  'standard', 'standard_unit', 'standard_type', 'exceeds_standard', 'also_reported_by', 'ccr_year', 'ccr_range_low', 'ccr_range_high', 'method', 'result_status', 'qualifier', 'sample_id', 'sample_media', 'source_parameter_name', 'link'];
 const XP_COL_HELP = {
   parameter:'Parameter chosen for the export', record_type:'sample = one laboratory result; CCR rows are report summaries', source:'Where the row came from: Weaver API, Water Quality Portal, or an NMED Consumer Confidence Report',
   provider:'Original data provider inside that source (for the Weaver API: ST/DWB = NMED Drinking Water Bureau, NMBGMR, BOR-RISE, WQP)', organization:'Collecting organization', site_id:'Site identifier in the source', site_name:'Site name',
   site_type:'Site type as the source reports it', water_source:'Groundwater, Surface water or Other, worked out from the site type', latitude:'WGS84', longitude:'WGS84', county:'County containing the site', huc8:'HUC-8 watershed code', huc8_name:'HUC-8 watershed name',
-  aquifer:'Aquifer polygon(s) containing the site, from the NMBGMR aquifer map built into the explorer; a location match, not a completion', reported_aquifer:'Aquifer name the source reports for the well (WQP only)', well_depth_ft:'Well depth in feet where the source has it',
+  aquifer:'Aquifer polygon(s) containing the site, from the NMBGMR aquifer map built into the explorer; a location match, not a completion', reported_aquifer:'Principal aquifer the source reports for the well (WQP only; for USGS wells, the NWIS national aquifer code)', reported_formation:'Local aquifer or formation the source reports (WQP only; for USGS wells, the NWIS local aquifer code, such as Santa Fe Group or Ogallala Formation)', well_depth_ft:'Well depth in feet where the source has it',
   pws_id:'Public water system ID', system_name:'Public water system name', pws_source_name:'Name of the system source (well, spring, intake). For Weaver API drinking-water sites this is the NMED source at the same location (within 5 m)', pws_match:'How the Weaver API drinking-water site was matched to an NMED source, or why it was not',
   sample_date:'YYYY-MM-DD. Blank when a CCR gives only a year', sample_year:'Year of the sample', sample_time:'Time where reported', result_as_reported:'The result exactly as the source gives it',
   censored:'< = below the reporting or detection limit; > = above the quantification range', value:'Numeric result. For censored results this is the limit', unit:'Unit of value',
-  value_mg_L:'Value in mg/L when the unit can be converted (nitrate is as N). Blank for units that cannot be converted', conversion_note:'What was done to get value_mg_L when it was more than a unit change',
+  value_mg_L:'Value in mg/L when the unit can be converted (nitrate is as N). Blank for units that cannot be converted', stat_value:'Value used for the statistics and the standard: value_mg_L when there is one, otherwise value in its reported unit (tritium in tritium units, TU)', stat_unit:'Unit of stat_value', conversion_note:'What was done to get value_mg_L or stat_value when it was more than a unit change',
   detection_limit:'Reporting or detection limit', detection_limit_unit:'Unit of the limit', fraction:'Dissolved, Total and so on. "Not reported" when the source does not say', speciation:'Chemical form the result is expressed as (as N, as NO3)',
-  standard_mg_L:'EPA drinking water limit used for comparison', standard_type:'MCL, action level or secondary MCL', exceeds_standard:'yes / no; "not determined" when a censored limit is above the standard',
+  standard:'EPA drinking water limit used for comparison', standard_unit:'Unit of the standard (mg/L; TU for tritium; pCi/L for strontium-90)', standard_type:'MCL, action level or secondary MCL', exceeds_standard:'yes / no; "not determined" when a censored limit is above the standard',
   also_reported_by:'Duplicate copies of this result that were removed (source, site and sample ID); see the Removed duplicates sheet', activity_type:'WQP activity type (Sample-Routine, Quality Control Sample-Field Replicate and so on)', removed_because:'Why this row was removed', kept_record:'The row that was kept instead (source | site | sample ID)', ccr_year:'CCR report year', ccr_range_low:'Low end of the range in the CCR', ccr_range_high:'High end of the range in the CCR',
   method:'Analytical method', result_status:'Status or approval', qualifier:'Qualifier codes', sample_id:'Sample or activity ID in the source', sample_media:'Sample medium', source_parameter_name:'Parameter name in the source', link:'Site or report page'};
 const xpDecode = s => { const t = document.createElement('textarea'); t.innerHTML = String(s == null ? '' : s); return t.value; };
 const xpFirstNum = s => { const m = String(s == null ? '' : s).replace(/,/g, '').match(/-?\d*\.?\d+(?:[eE][-+]?\d+)?/); return m ? +m[0] : null; };
 const XP_TO_MG = {'mg/l':1, 'ppm':1, 'ug/l':1e-3, 'µg/l':1e-3, 'μg/l':1e-3, 'mcg/l':1e-3, 'ppb':1e-3, 'ng/l':1e-6, 'ppt':1e-6, 'g/l':1000};
 const XP_SOLID = /\/\s?k?g\b|\bug\/g|\bmg\/g|%|\bdry\b|\bwet\b/i;
+const XP_TU_PCI = 3.19, XP_TU_BQ = 0.118;   // 1 tritium unit = 0.118 Bq/L = 3.19 pCi/L
 const sig = (v, n) => v == null || !isFinite(v) ? null : +(+v).toPrecision(n || 6);
 function xpIsoDate(s){
   s = String(s == null ? '' : s).trim(); let m;
@@ -2139,9 +2373,19 @@ function xpFinish(o, p){
       o.value_mg_L = sig(v); o.conversion_note = note;
     }
   }
+  // the value statistics and the standard use: mg/L when the unit converts, otherwise the reported unit
+  if(o.value_mg_L != null){ o.stat_value = o.value_mg_L; o.stat_unit = 'mg/L'; }
+  else if(o.value != null && u){
+    // tritium in tritium units (TU), the unit used for groundwater age work
+    const uk = u.toLowerCase().replace(/[\s.]/g, ''), tri = /^tritium$/i.test(o.source_parameter_name || p.label);
+    if(tri && uk === 'tu'){ o.stat_value = o.value; o.stat_unit = 'TU'; }
+    else if(tri && uk === 'pci/l'){ o.stat_value = sig(o.value / XP_TU_PCI, 4); o.stat_unit = 'TU'; o.conversion_note = 'pCi/L converted to tritium units (1 TU = ' + XP_TU_PCI + ' pCi/L)'; }
+    else if(tri && uk === 'bq/l'){ o.stat_value = sig(o.value / XP_TU_BQ, 4); o.stat_unit = 'TU'; o.conversion_note = 'Bq/L converted to tritium units (1 TU = ' + XP_TU_BQ + ' Bq/L)'; }
+    else { o.stat_value = o.value; o.stat_unit = u; }
+  }
   if(p.std){
-    o.standard_mg_L = p.std[0]; o.standard_type = p.std[1];
-    if(o.value_mg_L != null) o.exceeds_standard = o.censored === '<' ? (o.value_mg_L > p.std[0] ? 'not determined (limit above standard)' : 'no') : (o.value_mg_L > p.std[0] ? 'yes' : 'no');
+    const su = p.std[2] || 'mg/L'; o.standard = p.std[0]; o.standard_unit = su; o.standard_type = p.std[1];
+    if(o.stat_value != null && String(o.stat_unit).toLowerCase() === su.toLowerCase()) o.exceeds_standard = o.censored === '<' ? (o.stat_value > p.std[0] ? 'not determined (limit above standard)' : 'no') : (o.stat_value > p.std[0] ? 'yes' : 'no');
   }
   return o;
 }
@@ -2210,7 +2454,7 @@ async function xpWqp(p, out, say){
   for(let i=1; i<S.rows.length; i++){
     const r = S.rows[i], id = S.g(r, 'MonitoringLocationIdentifier'), lat = +S.g(r, 'LatitudeMeasure'), lng = +S.g(r, 'LongitudeMeasure'); if(!id || !isFinite(lat) || !isFinite(lng) || (!lat && !lng)) continue;
     let dep = xpFirstNum(S.g(r, 'WellDepthMeasure/MeasureValue')); if(dep != null && /^m/i.test(S.g(r, 'WellDepthMeasure/MeasureUnitCode'))) dep *= 3.28084;
-    sites.set(id, {lat, lng, n:S.g(r, 'MonitoringLocationName'), t:S.g(r, 'MonitoringLocationTypeName'), dep:dep == null ? null : +dep.toFixed(1), aq:S.g(r, 'AquiferName'), org:S.g(r, 'OrganizationFormalName'),
+    sites.set(id, {lat, lng, n:S.g(r, 'MonitoringLocationName'), t:S.g(r, 'MonitoringLocationTypeName'), dep:dep == null ? null : +dep.toFixed(1), aq:S.g(r, 'AquiferName'), form:S.g(r, 'FormationTypeText') || S.g(r, 'LocalAqfrName'), org:S.g(r, 'OrganizationFormalName'),
       url:'https://www.waterqualitydata.us/provider/' + [S.g(r, 'ProviderName'), S.g(r, 'OrganizationIdentifier'), id].map(encodeURIComponent).join('/') + '/', inA:inArea({lat, lng})});
   }
   say(p.label + ' · Water Quality Portal: results for ' + sites.size.toLocaleString() + ' sites (large statewide pulls can take a minute or two)…');
@@ -2220,7 +2464,7 @@ async function xpWqp(p, out, say){
     const sid = g(r, 'MonitoringLocationIdentifier'), st = sites.get(sid); if(!st || !st.inA) continue;
     const raw = g(r, 'ResultMeasureValue'), cond = g(r, 'ResultDetectionConditionText');
     out.push(xpFinish({parameter:p.label, record_type:'sample', source:'Water Quality Portal', provider:g(r, 'ProviderName'), organization:g(r, 'OrganizationFormalName') || st.org || g(r, 'OrganizationIdentifier'), site_id:sid, site_name:st.n, site_type:st.t, water_source:xpWaterSource(st.t),
-      latitude:st.lat, longitude:st.lng, well_depth_ft:st.dep, reported_aquifer:st.aq, sample_date:g(r, 'ActivityStartDate'), sample_time:g(r, 'ActivityStartTime/Time'), source_parameter_name:g(r, 'CharacteristicName'),
+      latitude:st.lat, longitude:st.lng, well_depth_ft:st.dep, reported_aquifer:st.aq, reported_formation:st.form, sample_date:g(r, 'ActivityStartDate'), sample_time:g(r, 'ActivityStartTime/Time'), source_parameter_name:g(r, 'CharacteristicName'),
       result_as_reported:raw || cond, censored:/not detected|below|less than|not present/i.test(cond) ? '<' : /above/i.test(cond) ? '>' : '', value:xpFirstNum(raw), unit:g(r, 'ResultMeasure/MeasureUnitCode'),
       fraction:g(r, 'ResultSampleFractionText'), speciation:g(r, 'MethodSpeciationName') || g(r, 'MethodSpecificationName'), detection_limit:g(r, 'DetectionQuantitationLimitMeasure/MeasureValue'), detection_limit_unit:g(r, 'DetectionQuantitationLimitMeasure/MeasureUnitCode'),
       method:g(r, 'ResultAnalyticalMethod/MethodName') || g(r, 'ResultAnalyticalMethod/MethodIdentifier'), result_status:g(r, 'ResultStatusIdentifier'), qualifier:g(r, 'MeasureQualifierCode'),
@@ -2281,9 +2525,9 @@ function xpCcr(p, out){
 const XP_DUP_M = 5;
 const xpFam = r => r.source === 'Weaver API' ? 'Weaver:' + r.provider : r.source;
 const XP_RANK = f => f === 'Water Quality Portal' ? 0 : f === 'Weaver:NMBGMR' ? 1 : /BOR/.test(f) ? 2 : /DWB/.test(f) ? 3 : f === 'Weaver:WQP' ? 9 : 5;
-const xpV3 = r => r.value_mg_L == null ? 'nv' : (+r.value_mg_L).toPrecision(3);
+const xpV3 = r => r.stat_value == null ? (r.value == null ? 'nv' : 'raw ' + r.value + ' ' + (r.unit || '')) : (+r.stat_value).toPrecision(3) + ' ' + String(r.stat_unit).toLowerCase();
 const xpRef = r => [r.source + (r.source === 'Weaver API' ? ' (' + r.provider + ')' : ''), r.site_id, r.sample_id].filter(Boolean).join(' | ');
-const XP_FILL = ['well_depth_ft', 'pws_id', 'system_name', 'pws_source_name', 'pws_match', 'reported_aquifer', 'method', 'detection_limit', 'detection_limit_unit', 'site_type'];
+const XP_FILL = ['well_depth_ft', 'pws_id', 'system_name', 'pws_source_name', 'pws_match', 'reported_aquifer', 'reported_formation', 'method', 'detection_limit', 'detection_limit_unit', 'site_type'];
 function xpRemoveDuplicates(rows){
   const removed = [], gone = new Set(), removedKeep = new Map();
   const drop = (r, why, keep, code) => {
@@ -2311,8 +2555,9 @@ function xpRemoveDuplicates(rows){
   for(const r of rows){
     if(gone.has(r) || xpFam(r) !== 'Weaver:WQP') continue;
     const c = wqp.get(r.parameter + '|' + String(r.site_id).replace(/^WQP:/, '') + '|' + r.sample_date); if(!c) continue;
-    const same = c.find(x=>x.value_mg_L != null && r.value_mg_L != null && Math.abs(x.value_mg_L - r.value_mg_L) <= 0.02*Math.max(x.value_mg_L, r.value_mg_L))
-      || ((r.censored === '<' || r.value_mg_L == null) && c.find(x=>x.censored === '<'));
+    const sameU = x => String(x.stat_unit).toLowerCase() === String(r.stat_unit).toLowerCase();
+    const same = c.find(x=>x.stat_value != null && r.stat_value != null && sameU(x) && Math.abs(x.stat_value - r.stat_value) <= 0.02*Math.max(Math.abs(x.stat_value), Math.abs(r.stat_value)))
+      || ((r.censored === '<' || r.stat_value == null) && c.find(x=>x.censored === '<'));
     if(!same) continue;
     let keep = same; while(keep && gone.has(keep)) keep = removedKeep.get(keep);   // the WQP row may itself be a repeat; point to the row that was kept
     if(keep) drop(r, 'Weaver API copy of a Water Quality Portal result (same site and date)', keep, 'Weaver API copy of a Water Quality Portal result');
@@ -2320,7 +2565,7 @@ function xpRemoveDuplicates(rows){
   }
   // 4. the same result in two sources at nearly the same place
   const idx = new Map();
-  for(const r of rows){ if(gone.has(r) || !r.sample_date || r.value_mg_L == null) continue; const k = [r.parameter, r.sample_date, xpV3(r), r.censored || ''].join('|'); if(!idx.has(k)) idx.set(k, []); idx.get(k).push(r); }
+  for(const r of rows){ if(gone.has(r) || !r.sample_date || r.stat_value == null) continue; const k = [r.parameter, r.sample_date, xpV3(r), r.censored || ''].join('|'); if(!idx.has(k)) idx.set(k, []); idx.get(k).push(r); }
   for(const g of idx.values()){
     if(g.length < 2) continue;
     g.sort((a, b)=>XP_RANK(xpFam(a)) - XP_RANK(xpFam(b)));
@@ -2336,22 +2581,28 @@ function xpRemoveDuplicates(rows){
   return {kept:rows.filter(r=>!gone.has(r)), removed};
 }
 const xpMedian = v => { if(!v.length) return null; const s = v.slice().sort((a, b)=>a - b), h = s.length >> 1; return s.length % 2 ? s[h] : (s[h-1] + s[h]) / 2; };
+// statistics use stat_value in the most common stat_unit of the group; rows in other units are counted, not mixed in
 function xpStats(rows){
-  const v = rows.filter(r=>r.value_mg_L != null).map(r=>r.value_mg_L), d = rows.map(r=>r.sample_date).filter(Boolean).sort();
+  const uc = new Map(); for(const r of rows) if(r.stat_value != null && r.stat_unit){ const k = r.stat_unit.toLowerCase(); uc.set(k, (uc.get(k) || 0) + 1); }
+  let key = null, best = 0; for(const [k, n] of uc) if(n > best || (n === best && k === 'mg/l')){ key = k; best = n; }
+  const inU = key == null ? [] : rows.filter(r=>r.stat_value != null && r.stat_unit && r.stat_unit.toLowerCase() === key), v = inU.map(r=>r.stat_value);
+  const d = rows.map(r=>r.sample_date).filter(Boolean).sort(), withV = rows.filter(r=>r.stat_value != null).length;
   return {n:rows.length, sites:new Set(rows.map(r=>r.source + '|' + r.site_id)).size, cens:rows.filter(r=>r.censored === '<').length, first:d[0] || '', last:d[d.length-1] || '',
-    min:v.length ? sig(Math.min(...v.slice(0, 1e5)), 4) : null, med:sig(xpMedian(v), 4), max:v.length ? sig(v.reduce((a, b)=>a > b ? a : b, -Infinity), 4) : null, over:rows.filter(r=>r.exceeds_standard === 'yes').length, std:rows[0] && rows[0].standard_mg_L};
+    unit:inU.length ? inU[0].stat_unit : '', inU, other:withV - inU.length,
+    min:v.length ? sig(v.reduce((a, b)=>a < b ? a : b, Infinity), 4) : null, med:sig(xpMedian(v), 4), max:v.length ? sig(v.reduce((a, b)=>a > b ? a : b, -Infinity), 4) : null,
+    over:rows.filter(r=>r.exceeds_standard === 'yes').length, std:rows[0] && rows[0].standard, stdUnit:rows[0] && rows[0].standard_unit};
 }
 function xpGroup(rows, keyFn){ const m = new Map(); for(const r of rows){ const k = keyFn(r); let a = m.get(k); if(!a){ a = []; m.set(k, a); } a.push(r); } return m; }
 function xpSummarySheet(samples){
-  const out = [], H = ['rows', 'sites', 'censored (<)', 'first date', 'last date', 'min mg/L', 'median mg/L', 'max mg/L', 'standard mg/L', 'results over standard'];
-  const line = s => [s.n, s.sites, s.cens, s.first, s.last, s.min, s.med, s.max, s.std, s.std != null ? s.over : null];
+  const out = [], H = ['rows', 'sites', 'censored (<)', 'first date', 'last date', 'unit', 'min', 'median', 'max', 'rows in other units', 'standard', 'results over standard'];
+  const line = s => [s.n, s.sites, s.cens, s.first, s.last, s.unit, s.min, s.med, s.max, s.other || null, s.std != null ? s.std + ' ' + s.stdUnit : null, s.std != null ? s.over : null];
   const block = (title, col, keyFn) => {
     out.push([title]); out.push(['parameter', col, ...H]);
     const g = xpGroup(samples, r=>r.parameter + '\u0001' + (keyFn(r) || '(none)'));
     for(const k of [...g.keys()].sort()){ const [a, b] = k.split('\u0001'); out.push([a, b, ...line(xpStats(g.get(k)))]); }
     out.push([]);
   };
-  out.push(['Statistics use value_mg_L. Censored results count at their limit. CCR report values and non-water units are on their own sheets and are not included here.']); out.push([]);
+  out.push(['Statistics use stat_value: mg/L where the unit converts, otherwise the reported unit (tritium in tritium units, TU). Each line uses its most common unit; rows in other units are counted but left out. Censored results count at their limit. CCR report values and non-water units are on their own sheets and are not included here.']); out.push([]);
   block('By source', 'source', r=>r.source + (r.source === 'Weaver API' && r.provider ? ' · ' + r.provider : ''));
   block('By water source', 'water source', r=>r.water_source);
   block('By county', 'county', r=>r.county);
@@ -2359,12 +2610,12 @@ function xpSummarySheet(samples){
   return out;
 }
 const XP_SITE_COLS = ['parameter', 'source', 'provider', 'site_id', 'site_name', 'site_type', 'water_source', 'latitude', 'longitude', 'county', 'huc8', 'huc8_name', 'aquifer', 'well_depth_ft', 'pws_id', 'system_name',
-  'results', 'censored', 'first_date', 'last_date', 'min_mg_L', 'median_mg_L', 'max_mg_L', 'latest_mg_L', 'standard_mg_L', 'results_over_standard', 'link'];
+  'results', 'censored', 'first_date', 'last_date', 'stat_unit', 'min', 'median', 'max', 'latest', 'results_other_units', 'standard', 'standard_unit', 'results_over_standard', 'link'];
 function xpSiteSheet(samples){
   const g = xpGroup(samples, r=>r.parameter + '|' + r.source + '|' + r.site_id), out = [XP_SITE_COLS];
   for(const rows of g.values()){
-    const r = rows[0], s = xpStats(rows), dated = rows.filter(x=>x.sample_date && x.value_mg_L != null).sort((a, b)=>a.sample_date < b.sample_date ? -1 : 1), last = dated[dated.length-1];
-    const o = Object.assign({}, r, {results:s.n, censored:s.cens, first_date:s.first, last_date:s.last, min_mg_L:s.min, median_mg_L:s.med, max_mg_L:s.max, latest_mg_L:last ? last.value_mg_L : null, results_over_standard:s.std != null ? s.over : null});
+    const r = rows[0], s = xpStats(rows), dated = s.inU.filter(x=>x.sample_date).sort((a, b)=>a.sample_date < b.sample_date ? -1 : 1), last = dated[dated.length-1];
+    const o = Object.assign({}, r, {results:s.n, censored:s.cens, first_date:s.first, last_date:s.last, stat_unit:s.unit, min:s.min, median:s.med, max:s.max, latest:last ? last.stat_value : null, results_other_units:s.other || null, standard:s.std, standard_unit:s.stdUnit, results_over_standard:s.std != null ? s.over : null});
     out.push(XP_SITE_COLS.map(c=>o[c] == null ? '' : o[c]));
   }
   return out;
@@ -2427,8 +2678,62 @@ async function xlsxBlob(sheets){
 }
 
 /* ---- the Export samples tab ---- */
-$('xp-params').innerHTML = XP_PARAMS.map(p=>`<label class="xp-p"><input type="checkbox" value="${p.k}"><span>${esc(p.label)}</span><small>${[p.weaver ? 'Weaver' : '', 'WQP', p.ccr ? 'CCR' : ''].filter(Boolean).join(' · ')}</small></label>`).join('');
-const xpChosen = () => [...document.querySelectorAll('#xp-params input:checked')].map(i=>XP_BY.get(i.value));
+// any WQP parameter can be added with the same search as the WQP tab. Weaver has none of these; CCRs only when a report uses the same name.
+const XP_CCR_NAMES = (()=>{ const s = new Set(); if(CCR) for(const yrs of Object.values(CCR.s)) for(const rec of Object.values(yrs)) for(const c of (rec.c || [])) s.add(String(c[1]).toLowerCase()); return s; })();
+// EPA limits for radionuclides that are set as an annual dose (4 mrem/yr) and published as these concentrations
+const XP_EXTRA_STD = {'tritium':[6270, 'MCL: 20,000 pCi/L (4 mrem/yr, derived), shown in TU', 'TU'], 'strontium-90':[8, 'MCL (4 mrem/yr, derived)', 'pCi/L']};
+const reEsc = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function xpCustom(name){
+  const ex = XP_PARAMS.find(p=>p.wqp.some(n=>n.toLowerCase() === name.toLowerCase())); if(ex) return ex;
+  const k = 'wqp:' + name; let p = XP_BY.get(k); if(p) return p;
+  p = {k, label:name, wqp:[name], custom:true, std:XP_EXTRA_STD[name.toLowerCase()]};
+  if(XP_CCR_NAMES.has(name.toLowerCase())) p.ccr = new RegExp('^' + reEsc(name) + '$', 'i');
+  XP_PARAMS.push(p); XP_BY.set(k, p); return p;
+}
+const xpCustomSave = () => ls.set('wq-xp-custom', JSON.stringify(XP_PARAMS.filter(p=>p.custom).map(p=>p.label)));
+(()=>{ try{ for(const n of JSON.parse(ls.get('wq-xp-custom') || '[]')) xpCustom(n); }catch(e){} })();
+function xpRenderParams(){
+  const on = new Set([...document.querySelectorAll('#xp-params input:checked')].map(i=>i.value));
+  const list = XP_PARAMS.filter(p=>p.custom).concat(XP_PARAMS.filter(p=>!p.custom));
+  $('xp-params').innerHTML = list.map(p=>`<label class="xp-p${p.custom ? ' custom' : ''}"><input type="checkbox" value="${esc(p.k)}" ${on.has(p.k) ? 'checked' : ''}><span>${esc(p.label)}${p.custom ? ` <span class="xp-rm" role="button" tabindex="0" data-xprm="${esc(p.k)}" title="Take ${esc(p.label)} off the list">×</span>` : ''}</span><small>${[p.weaver ? 'Weaver' : '', 'WQP', p.ccr ? 'CCR' : ''].filter(Boolean).join(' · ')}</small></label>`).join('');
+}
+xpRenderParams();
+const xpChosen = () => [...document.querySelectorAll('#xp-params input:checked')].map(i=>XP_BY.get(i.value)).filter(Boolean);
+function xpAddParam(name){
+  const p = xpCustom(name); if(p.custom) xpCustomSave();
+  xpRenderParams();
+  const cb = [...document.querySelectorAll('#xp-params input')].find(i=>i.value === p.k);
+  if(cb){ cb.checked = true; cb.closest('.xp-p').scrollIntoView({block:'nearest'}); }
+  $('xp-search').value = ''; xpSearchRender(); xpAvail();
+  if(!p.custom) toast(p.label + ' is already on the list, so it was ticked there.');
+}
+let xpHits = [];
+function xpSearchRender(){
+  const el = $('xp-search-res'), f = wqppFind($('xp-search').value, 30);
+  if(!f){ el.hidden = true; el.innerHTML = ''; xpHits = []; return; }
+  const row = (n, gk, cnt) => `<div class="wrow" role="button" tabindex="0" data-xadd="${esc(n)}"><span class="k" title="${esc(n)}">${esc(n)}</span><span class="gk" title="${esc(gk)}">${esc(gk)}</span><span class="n">${cnt}</span></div>`;
+  xpHits = f.hits.map(r=>r[0]);
+  let html = f.hits.map(r=>row(r[0], wqppGroupLabel(r), r[1].toLocaleString() + ' sites')).join('');
+  if(f.total > f.hits.length) html += `<div class="wrow more"><span class="hint" style="margin:0">${(f.total - f.hits.length).toLocaleString()} more. Add a word to narrow the search.</span></div>`;
+  if(f.extra === null){ if(!f.hits.length) html = '<div class="wrow more"><span class="hint" style="margin:0">Searching WQP\'s full list of names…</span></div>'; }
+  else if(f.extra.length){ html += `<div class="wrow more"><span class="hint" style="margin:0">No New Mexico results listed for these (as of ${esc(WQPP.at)}).</span></div>` + f.extra.map(n=>row(n, '', '–')).join(''); xpHits = xpHits.concat(f.extra); }
+  if(!html) html = '<div class="wrow more"><span class="hint" style="margin:0">No WQP parameter names match.</span></div>';
+  el.innerHTML = html; el.hidden = false;
+}
+$('xp-search').addEventListener('input', xpSearchRender);
+$('xp-search').addEventListener('keydown', e=>{
+  if(e.key === 'Enter'){ e.preventDefault(); if(xpHits.length) xpAddParam(xpHits[0]); }
+  else if(e.key === 'Escape'){ e.target.value = ''; xpSearchRender(); }
+});
+$('xp-search-res').addEventListener('click', e=>{ const r = e.target.closest('[data-xadd]'); if(r) xpAddParam(r.dataset.xadd); });
+$('xp-search-res').addEventListener('keydown', e=>{ const r = e.target.closest('[data-xadd]'); if(r && (e.key === 'Enter' || e.key === ' ')){ e.preventDefault(); xpAddParam(r.dataset.xadd); } });
+$('xp-params').addEventListener('click', e=>{
+  const x = e.target.closest('[data-xprm]'); if(!x) return;
+  e.preventDefault();
+  const i = XP_PARAMS.findIndex(p=>p.k === x.dataset.xprm); if(i >= 0 && XP_PARAMS[i].custom){ XP_BY.delete(XP_PARAMS[i].k); XP_PARAMS.splice(i, 1); }
+  xpCustomSave(); xpRenderParams(); xpAvail();
+});
+$('xp-params').addEventListener('keydown', e=>{ const x = e.target.closest('[data-xprm]'); if(x && (e.key === 'Enter' || e.key === ' ')){ e.preventDefault(); x.click(); } });
 function xpAvail(){
   const ps = xpChosen();
   $('xp-avail').textContent = ps.length ? ps.length + ' selected: ' + ps.map(p=>p.label).join(', ') + (ps.some(p=>!p.weaver) ? '. The Weaver API has no data for ' + ps.filter(p=>!p.weaver).map(p=>p.label.toLowerCase()).join(', ') + '.' : '') : 'Tick one or more parameters.';
@@ -2469,7 +2774,7 @@ $('xp-go').onclick = async ()=>{
     samples.sort(byDate); ccr.sort(byDate); solid.sort(byDate);
     const toRows = rs => [XP_COLS, ...rs.map(o=>XP_COLS.map(c=>o[c] == null ? '' : o[c]))];
     const area = state.area ? state.area.name.replace(/[^\w]+/g, '_').replace(/^_|_$/g, '') : 'NM_statewide';
-    const stem = (ps.length === 1 ? ps[0].k : ps.length <= 3 ? ps.map(p=>p.k).join('_') : ps.length + '_parameters') + '_samples_' + area + '_' + new Date().toISOString().slice(0, 10);
+    const pk = p => p.custom ? slug(p.label) : p.k, stem = (ps.length === 1 ? pk(ps[0]) : ps.length <= 3 ? ps.map(pk).join('_') : ps.length + '_parameters') + '_samples_' + area + '_' + new Date().toISOString().slice(0, 10);
     const counts = `${samples.length.toLocaleString()} samples · ${ccr.length.toLocaleString()} PWS summary rows` + (solid.length ? ` · ${solid.length.toLocaleString()} non-water results` : '') + (nDup ? ` · ${nDup.toLocaleString()} duplicates removed` : '');
     const failed = log.filter(l=>/^failed/.test(String(l[1])));
     if(!all.length){ say('Nothing to save. ' + log.map(l=>l[0] + ': ' + l[1]).join(' · ')); }
@@ -2493,9 +2798,9 @@ $('xp-go').onclick = async ()=>{
         ['Sources', 'Weaver API = NM Unified Water Data API (mostly NMED Drinking Water Bureau samples, plus NMBGMR, BOR and others). Water Quality Portal = USGS and EPA results. CCR = NMED Drinking Water Watch reports.'],
         ['Public water systems', 'Weaver API drinking-water sites are matched to an NMED source only when the source is at the same location (within ' + XP_DW_MATCH_M + ' m; nearly all are within 2 m, the rounding between the two services) and belongs to a single system. pws_match says how each site was matched or why it was not.'],
         ['Censored results', 'censored "<" means below the limit; value then holds the limit. Some WQP results have no value and no limit; those have a blank value.'],
-        ['Units', 'value and unit are as reported. value_mg_L converts mg/L, µg/L, ppm, ppb and ng/L. Uranium in pCi/L is converted at 0.67 pCi per µg. Nitrate as NO3 is converted to as N.'],
+        ['Units', 'value and unit are as reported. value_mg_L converts mg/L, µg/L, ppm, ppb and ng/L. Uranium in pCi/L is converted at 0.67 pCi per µg. Nitrate as NO3 is converted to as N. stat_value is what the statistics and standards use: value_mg_L when there is one, otherwise the value in its reported unit, with tritium in tritium units: pCi/L and Bq/L results are converted at 1 TU = ' + XP_TU_PCI + ' pCi/L = ' + XP_TU_BQ + ' Bq/L.'],
         ['Fraction', 'Dissolved and total results are both included. The Weaver API and CCRs do not report a fraction.'],
-        ['Standards', 'EPA drinking water limits. Lead and copper use the action level; TDS, sulfate, chloride, iron, manganese and zinc use the secondary limit. Results from streams and other non-drinking water are compared too, for reference only.'],
+        ['Standards', 'EPA drinking water limits. Lead and copper use the action level; TDS, sulfate, chloride, iron, manganese and zinc use the secondary limit. Tritium (20,000 pCi/L, which is 6,270 TU) and strontium-90 (8 pCi/L) use the concentrations EPA derives from the 4 mrem/yr beta/photon MCL. Other added WQP parameters have no standard here. Results from streams and other non-drinking water are compared too, for reference only.'],
         ['Duplicates', 'Removed, and listed on the Removed duplicates sheet with the reason and the row kept instead. Rules, in order: (1) WQP quality-control blanks and spikes (field replicates are kept and labeled in activity_type); (2) the same record repeated inside one source (same site, date, time, value, fraction and method); (3) Weaver API copies of WQP results when the WQP result is in the export; (4) the same parameter, date, value and censoring in two different sources at sites no more than ' + XP_DUP_M + ' m apart. Different sites inside one source are never merged. The kept row is the Water Quality Portal one when there is one, then NMBGMR, BOR, NMED DWB. also_reported_by on the kept row lists the removed copies, and missing fields are filled from them.'],
         ['Duplicates removed', nDup], ...Object.entries(whyCount).map(([k, v])=>['  ' + k, v]),
         ['Aquifer', 'From the site location inside NMBGMR aquifer polygons. Overlapping aquifers are all listed; it does not say which one a well is completed in.'],
@@ -2504,7 +2809,7 @@ $('xp-go').onclick = async ()=>{
       const bold = new Set([0]); readme.forEach((r, i)=>{ if(r.length === 1 && i) bold.add(i); });
       const summ = xpSummarySheet(samples), sb = new Set(); summ.forEach((r, i)=>{ if(r.length === 1 || r[0] === 'parameter') sb.add(i); });
       const w = XP_COLS.map(c=>/site_name|system_name|organization|aquifer|method|link|result_as_reported|conversion_note|exceeds/.test(c) ? 30 : /^(source|record_type|site_type|site_id|sample_id|source_parameter_name|pws_source_name|huc8_name)$/.test(c) ? 24 : 14);
-      const sheets = [{name:'Read me', rows:readme, widths:[30, 110], boldRows:bold}, {name:'Summary', rows:summ, widths:[24, 44, 10, 10, 12, 12, 12, 12, 12, 12, 14, 20], boldRows:sb},
+      const sheets = [{name:'Read me', rows:readme, widths:[30, 110], boldRows:bold}, {name:'Summary', rows:summ, widths:[24, 44, 10, 10, 12, 12, 12, 10, 12, 12, 12, 12, 16, 14], boldRows:sb},
         {name:'Site summary', rows:xpSiteSheet(samples), header:true, widths:XP_SITE_COLS.map(c=>/name|aquifer|link/.test(c) ? 30 : 15)}, {name:'Samples', rows:toRows(samples), header:true, widths:w}, {name:'PWS summaries', rows:toRows(ccr), header:true, widths:w}];
       if(solid.length) sheets.push({name:'Other matrices', rows:toRows(solid), header:true, widths:w});
       if(removed.length){ const RC = ['removed_because', 'kept_record', ...XP_COLS.filter(c=>c !== 'also_reported_by')]; removed.sort(byDate); sheets.push({name:'Removed duplicates', rows:[RC, ...removed.map(o=>RC.map(c=>o[c] == null ? '' : o[c]))], header:true, widths:RC.map((c, i)=>i < 2 ? 50 : 16)}); }
