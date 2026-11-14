@@ -90,6 +90,12 @@
         <p class="hint">Counts are sites in the selected area. Unchecked types are hidden on the map and left out of downloads.</p>
       </div>
       <div class="section">
+        <div class="section-head-row"><h4>Reported aquifer</h4><button class="linkbtn" id="wqp-aq-clear" hidden>Clear</button></div>
+        <button class="btn small" id="wqp-aq-load" style="width:100%">Load aquifer designations</button>
+        <select class="selfield" id="wqp-aq" hidden aria-label="Reported aquifer or formation"></select>
+        <p class="hint" id="wqp-aq-hint" style="margin-top:6px"></p>
+      </div>
+      <div class="section">
         <div class="section-head-row"><h4>Sample dates</h4><button class="linkbtn" id="wqp-date-clear">Clear</button></div>
         <div class="numrow">
           <input class="numfield" type="date" id="wqp-from" aria-label="From date">
@@ -100,8 +106,15 @@
       </div>
       <div class="section">
         <div class="section-head-row"><h4>Parameters measured here</h4><span><button class="linkbtn" id="wqp-groups-all">All</button> · <button class="linkbtn" id="wqp-groups-none">None</button></span></div>
+        <input type="search" class="wq-search" id="wqp-search" placeholder="Search parameters: tritium, arsenic, isotope…" autocomplete="off" spellcheck="false" aria-label="Search WQP parameter names">
+        <div id="wqp-search-res" class="wlist" hidden></div>
+        <div id="wqp-picks-box" hidden>
+          <div class="section-head-row" style="margin:2px 0 4px"><h4 style="font-size:11px">Picked parameters</h4><button class="linkbtn" id="wqp-picks-clear">Clear</button></div>
+          <div id="wqp-picks" class="wq-picks"></div>
+          <div class="toggle-row" style="margin-bottom:8px"><span class="tlabel">Only sites that measured them</span><label class="switch"><input type="checkbox" id="wqp-picks-only" checked><span class="track"></span></label></div>
+        </div>
         <div id="wqp-groups" class="wlist"></div>
-        <p class="hint">Water results per parameter group, all years. Untick a group to leave it out of the download.</p>
+        <p class="hint" id="wqp-groups-hint"></p>
       </div>
       <div class="section">
         <h4>Download results</h4>
@@ -307,6 +320,8 @@
       <p class="hint" style="margin:0 0 12px">Every result for the parameters you tick, from each source, in one workbook with shared columns, a summary and a per-site sheet. Uses the selected area; the Filters tab does not apply.</p>
       <div class="section">
         <div class="section-head-row"><h4>Parameters</h4><button class="btn small" id="xp-none">Clear</button></div>
+        <input type="search" class="wq-search" id="xp-search" placeholder="Add any WQP parameter: tritium, carbon-14, isotope…" autocomplete="off" spellcheck="false" aria-label="Search WQP parameter names to add">
+        <div id="xp-search-res" class="wlist" hidden></div>
         <div id="xp-params"></div>
         <p class="hint" id="xp-avail" style="margin-top:6px"></p>
       </div>
@@ -431,6 +446,9 @@
         <li>The site list comes from WQP's summary service: every New Mexico monitoring location with water-sample results (about 16,000 of the 48,000 registered sites; the rest have none), with result counts by parameter group. It is kept in this browser for 24 hours.</li>
         <li><b>Downloads</b> follow the same rules as the WQP polygon downloader. Up to 150 sites: one link and WQP builds the file. Up to 1,000: site IDs are sent in batches of 25, and any batch WQP can't finish is split in half and retried. Beyond that: WQP is queried by the area's bounding box, site types and date range in decade pieces, split down to two weeks when slow, and only rows for the selected sites are kept. In Chrome and Edge large downloads are written straight to a file you choose; Stop saves what has arrived.</li>
         <li>The CSV is WQP's own result table, unchanged. Unticking a parameter group adds a <code>characteristicType</code> filter.</li>
+        <li><b>Single parameters.</b> The search box and the ▶ lists under each group cover every parameter name with New Mexico water results in WQP (2,189 names as of 2026-11-14, from WQP's period-of-record summaries). WQP files some parameters where you might not look: tritium and carbon-14 are <i>Radiochemical</i>, and the deuterium/hydrogen ratio is <i>Physical</i>, while oxygen-18 is <i>Stable Isotopes</i>. Searching "isotope" finds all of them. Picking a name asks WQP's Station service which sites measured it, kept in this browser for a day. The map and the selection can be limited to those sites, and the download then uses <code>characteristicName</code> filters in place of the groups.</li>
+        <li><b>Reported aquifer.</b> "Load aquifer designations" reads the aquifer and formation WQP lists for every New Mexico well and spring (about 13 MB, kept for a day). Choosing one limits the map, the count and the download to sites listed in it; sites with no designation are left out while a choice is set. This is what the site reports, unlike the Area tab's aquifer, which is a location inside NMBGMR aquifer polygons.</li>
+        <li><b>Aquifer and well details.</b> Opening a WQP well or spring fetches its Station record: the local aquifer or formation (for example Santa Fe Group or Ogallala Formation), the principal aquifer, aquifer type, well and hole depth, and construction date. For USGS wells these are the NWIS site-file codes. Other organizations rarely fill them in. USGS wells also get a link to their USGS Water Data page, which shows any water levels.</li>
         <li><b>Adding chemistry to the explorer</b> pulls only the 13 analytes for groundwater sites. A WQP site joins an API well when the API lists it under source <code>WQP</code> with the same ID, or when the USGS site number matches. API values always win. Other sites become wells under the source <code>WQP (direct)</code>. µg/L converts to mg/L, nitrate as NO₃ converts to as-N, results in other units are dropped, and where a site has no bicarbonate, total alkalinity × 1.22 stands in.</li>
       </ul>
       <h4>Public water systems (Public Water Systems tab)</h4>
@@ -443,6 +461,7 @@
       </ul>
       <h4>Exports</h4>
       <p>Export CSV and GeoJSON include every well in the current selection and filters, with latest, maximum, mean, sample count and exceedance flag for each analyte, plus which analytes came from WQP. Sample-history CSVs come straight from the time-series collections, including the original reported text for non-detects.</p>
+      <p><b>Export samples tab.</b> Any WQP parameter can be added with the search box above the list (it uses the same New Mexico list as the WQP tab). Added parameters come from WQP only; the Weaver API has none of them, and CCRs only when a report uses the same name. Statistics and standards use <code>stat_value</code>: mg/L where the unit converts, otherwise the reported unit. Tritium is in tritium units (TU); pCi/L results are converted at 1 TU = 3.19 pCi/L. Tritium (20,000 pCi/L, which is 6,270 TU) and strontium-90 (8 pCi/L) are compared with the concentrations EPA derives from its 4 mrem/yr MCL; other added parameters have no standard. WQP rows carry the aquifer and formation the source reports, besides the location match to NMBGMR aquifer polygons.</p>
     </div>
   </div>
 </div>
@@ -466,6 +485,7 @@
 <script src="data/aquifers.js"></script>
 <script src="data/lead-copper.js"></script>
 <script src="data/ccr.js"></script>
+<script src="data/wqp-params.js"></script>
 <script id="wqp-core">
 /* ==================================================================== */
 /* WQP core: parsing and unit handling, no DOM (also runs under Node)   */
