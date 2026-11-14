@@ -42,6 +42,7 @@ Everything else is fetched when you use the tool, and kept in the browser for 24
 ## WQP tab
 
 - **Parameter search and group lists:** search any WQP parameter name (tritium, arsenic, "isotope"), or open a parameter group with ▶ to see the names in it. WQP files some where you might not look: tritium and carbon-14 are *Radiochemical*, and the deuterium/hydrogen ratio is *Physical*. Picking a name asks WQP which sites measured it. The map, the site count and the download can then be limited to those sites, and the download includes only the picked parameters.
+- **Downloads** are WQP's own result file. When tritium may be in it, three columns follow WQP's unit column: `TU_Value`, `TU_DetectionLimit` and `TU_Note` (tritium in tritium units). Downloads too big for one request ask where to save, starting in Downloads.
 - **Reported aquifer:** "Load aquifer designations" reads the aquifer and formation WQP lists for every New Mexico well and spring (about 13 MB, kept for a day). Choosing one limits the map, the count and the download. Nearly all designations are USGS; other organizations rarely give one, so their sites drop out while a choice is set.
 - **Site popups:** wells and springs show the reported formation, principal aquifer, aquifer type, well depth and construction date, fetched from WQP when the popup opens. USGS sites link to their USGS Water Data page.
 
@@ -59,7 +60,7 @@ Right drawer → **Export samples**. Tick one or more parameters, choose the sou
 
 ### Units and standards
 
-`value` and `unit` are as reported. `value_mg_L` converts mass units. `stat_value` and `stat_unit` are what the statistics and the standard comparison use: mg/L where the unit converts, otherwise the reported unit. Tritium is always in tritium units (TU); pCi/L results are converted at 1 TU = 3.19 pCi/L, and Bq/L at 1 TU = 0.118 Bq/L. Each statistic uses the most common unit in its group, and rows in other units are counted but left out.
+`value` and `unit` are as reported, except tritium: its `value`, `unit` and detection limit are always in tritium units (TU), with the original result in `result_as_reported` and `conversion_note`. `value_mg_L` converts mass units. `stat_value` and `stat_unit` are what the statistics and the standard comparison use: mg/L where the unit converts, otherwise the reported unit. Tritium is always in tritium units (TU); pCi/L results are converted at 1 TU = 3.19 pCi/L, and Bq/L at 1 TU = 0.118 Bq/L. Each statistic uses the most common unit in its group, and rows in other units are counted but left out.
 
 Tritium is compared with EPA's 20,000 pCi/L (6,270 TU) and strontium-90 with 8 pCi/L, the concentrations EPA derives from its 4 mrem/yr MCL. Other added parameters have no standard. WQP rows carry `reported_aquifer` and `reported_formation`, the designations the source gives, besides `aquifer`, the location match to NMBGMR aquifer polygons.
 

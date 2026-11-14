@@ -1616,10 +1616,17 @@ function wqpPostBody(ids){
 const dlProg = (msg, err) => { const el = $('wqp-dl-progress'); el.textContent = msg; el.style.color = err ? 'var(--warn)' : ''; };
 function dlName(n){ const pn = [...wqp.picks.keys()]; return 'wqp_' + (pn.length === 1 ? slug(pn[0]) : pn.length ? pn.length + '_parameters' : 'results') + '_' + slug(state.area ? state.area.name : 'new_mexico') + '_' + n + 'sites_' + new Date().toISOString().slice(0, 10) + '.csv'; }
 // opens a file to stream into (Chrome/Edge), or collects in memory
+// tritium in tritium units: 1 TU = 3.19 pCi/L = 0.118 Bq/L. Returns null for other units.
+const TU_PER = {'tu':1, 'pci/l':3.19, 'bq/l':0.118};
+function toTU(v, unit){
+  const f = TU_PER[String(unit || '').toLowerCase().replace(/[\s.]/g, '')], x = v === '' || v == null ? NaN : +String(v).replace(/,/g, '');
+  if(f == null || !isFinite(x)) return null;
+  return +(x / f).toPrecision(4);
+}
 async function openSink(name, estRows){
   if('showSaveFilePicker' in window){
     try{
-      const h = await window.showSaveFilePicker({suggestedName:name, types:[{description:'CSV', accept:{'text/csv':['.csv']}}]});
+      const h = await window.showSaveFilePicker({suggestedName:name, startIn:'downloads', id:'wqp-results', types:[{description:'CSV', accept:{'text/csv':['.csv']}}]});
       const wr = await h.createWritable(); let q = Promise.resolve();
       return {write:t=>{ q = q.then(()=>wr.write(t)); return q; }, close:async()=>{ await q; await wr.close(); }, streamed:true};
     }catch(e){ if(e.name === 'AbortError') return null; }
@@ -1642,8 +1649,10 @@ async function wqpDownload(){
   const est = wqpEstimate(sel), ids = sel.map(q=>q.id);
   if(est > 750000 && Date.now() - dlConfirmAt > 10000){ dlConfirmAt = Date.now(); $('wqp-dl').textContent = 'About ' + est.toLocaleString() + ' results (≈' + fmtMB(est) + '). Click again to start'; return; }
   dlConfirmAt = 0;
+  // tritium may be in the file: add TU columns, so the browser fetches the results instead of WQP building the file
+  const addTU = wqp.picks.size ? wqp.picks.has('Tritium') : !wqp.exGroups.has('Radiochemical');
   // 1. small: let WQP build the file
-  if(ids.length <= WQP_GET_MAX){
+  if(ids.length <= WQP_GET_MAX && !addTU){
     const p = wqpResultParams(); ids.forEach(id=>p.append('siteid', id));
     const a = document.createElement('a'); a.href = WQP_BASE + '/Result/search?' + p; a.target = '_blank'; a.rel = 'noopener'; document.body.appendChild(a); a.click(); a.remove();
     dlProg('Asked WQP for ' + ids.length + ' site' + (ids.length === 1 ? '' : 's') + '. The CSV downloads from WQP in a new tab; large ones can take a minute to start.');
@@ -1652,13 +1661,31 @@ async function wqpDownload(){
   dlBusy = true; dlCancel = false;
   $('wqp-dl').disabled = true; $('wqp-stop').hidden = false;
   const idSet = new Set(ids), name = dlName(ids.length);
-  let sink = null, header = null, rows = 0;
+  let sink = null, header = null, rows = 0, tuAt = -1;
   const failed = [];
   const take = async text=>{
     const rs = WQPCore.parseCsv(text); if(rs.length < 2) return;
-    if(!header){ header = rs[0]; await sink.write(rs[0].map(csvCell).join(',') + '\r\n'); }
-    const idIx = header.indexOf('MonitoringLocationIdentifier'); let out = '';
-    for(let i=1; i<rs.length; i++){ const r = rs[i]; if(r.length < 2) continue; if(idIx >= 0 && !idSet.has(r[idIx])) continue; out += r.map(csvCell).join(',') + '\r\n'; rows++; }
+    if(!header){
+      header = rs[0];
+      const ui = header.indexOf('ResultMeasure/MeasureUnitCode');
+      tuAt = addTU && ui >= 0 && header.includes('CharacteristicName') ? ui + 1 : -1;
+      await sink.write((tuAt < 0 ? header : [...header.slice(0, tuAt), 'TU_Value', 'TU_DetectionLimit', 'TU_Note', ...header.slice(tuAt)]).map(csvCell).join(',') + '\r\n');
+    }
+    const idIx = header.indexOf('MonitoringLocationIdentifier'), cx = k => header.indexOf(k); let out = '';
+    const iN = cx('CharacteristicName'), iV = cx('ResultMeasureValue'), iU = cx('ResultMeasure/MeasureUnitCode'), iDV = cx('DetectionQuantitationLimitMeasure/MeasureValue'), iDU = cx('DetectionQuantitationLimitMeasure/MeasureUnitCode');
+    for(let i=1; i<rs.length; i++){
+      let r = rs[i]; if(r.length < 2) continue; if(idIx >= 0 && !idSet.has(r[idIx])) continue;
+      if(tuAt >= 0){
+        let tv = '', td = '', tn = '';
+        if(/^tritium$/i.test(r[iN] || '')){
+          const a = toTU(r[iV], r[iU]), b = iDV >= 0 ? toTU(r[iDV], r[iDU]) : null;
+          if(a != null) tv = a; if(b != null) td = b;
+          tn = a == null && b == null ? (r[iV] || r[iDV] ? 'unit not converted: ' + (r[iU] || r[iDU] || 'none given') : '') : /^t\.?\s?u\.?$/i.test(r[iU] || r[iDU] || '') ? 'reported in TU' : 'converted from ' + (r[iU] || r[iDU]) + ' (1 TU = 3.19 pCi/L = 0.118 Bq/L)';
+        }
+        r = [...r.slice(0, tuAt), tv, td, tn, ...r.slice(tuAt)];
+      }
+      out += r.map(csvCell).join(',') + '\r\n'; rows++;
+    }
     if(out) await sink.write(out);
   };
   try{
@@ -2331,7 +2358,7 @@ const XP_COL_HELP = {
   aquifer:'Aquifer polygon(s) containing the site, from the NMBGMR aquifer map built into the explorer; a location match, not a completion', reported_aquifer:'Principal aquifer the source reports for the well (WQP only; for USGS wells, the NWIS national aquifer code)', reported_formation:'Local aquifer or formation the source reports (WQP only; for USGS wells, the NWIS local aquifer code, such as Santa Fe Group or Ogallala Formation)', well_depth_ft:'Well depth in feet where the source has it',
   pws_id:'Public water system ID', system_name:'Public water system name', pws_source_name:'Name of the system source (well, spring, intake). For Weaver API drinking-water sites this is the NMED source at the same location (within 5 m)', pws_match:'How the Weaver API drinking-water site was matched to an NMED source, or why it was not',
   sample_date:'YYYY-MM-DD. Blank when a CCR gives only a year', sample_year:'Year of the sample', sample_time:'Time where reported', result_as_reported:'The result exactly as the source gives it',
-  censored:'< = below the reporting or detection limit; > = above the quantification range', value:'Numeric result. For censored results this is the limit', unit:'Unit of value',
+  censored:'< = below the reporting or detection limit; > = above the quantification range', value:'Numeric result. For censored results this is the limit. Tritium is in tritium units (TU)', unit:'Unit of value (as reported, except tritium: TU)',
   value_mg_L:'Value in mg/L when the unit can be converted (nitrate is as N). Blank for units that cannot be converted', stat_value:'Value used for the statistics and the standard: value_mg_L when there is one, otherwise value in its reported unit (tritium in tritium units, TU)', stat_unit:'Unit of stat_value', conversion_note:'What was done to get value_mg_L or stat_value when it was more than a unit change',
   detection_limit:'Reporting or detection limit', detection_limit_unit:'Unit of the limit', fraction:'Dissolved, Total and so on. "Not reported" when the source does not say', speciation:'Chemical form the result is expressed as (as N, as NO3)',
   standard:'EPA drinking water limit used for comparison', standard_unit:'Unit of the standard (mg/L; TU for tritium; pCi/L for strontium-90)', standard_type:'MCL, action level or secondary MCL', exceeds_standard:'yes / no; "not determined" when a censored limit is above the standard',
@@ -2378,9 +2405,13 @@ function xpFinish(o, p){
   else if(o.value != null && u){
     // tritium in tritium units (TU), the unit used for groundwater age work
     const uk = u.toLowerCase().replace(/[\s.]/g, ''), tri = /^tritium$/i.test(o.source_parameter_name || p.label);
-    if(tri && uk === 'tu'){ o.stat_value = o.value; o.stat_unit = 'TU'; }
-    else if(tri && uk === 'pci/l'){ o.stat_value = sig(o.value / XP_TU_PCI, 4); o.stat_unit = 'TU'; o.conversion_note = 'pCi/L converted to tritium units (1 TU = ' + XP_TU_PCI + ' pCi/L)'; }
-    else if(tri && uk === 'bq/l'){ o.stat_value = sig(o.value / XP_TU_BQ, 4); o.stat_unit = 'TU'; o.conversion_note = 'Bq/L converted to tritium units (1 TU = ' + XP_TU_BQ + ' Bq/L)'; }
+    const tv = tri ? toTU(o.value, u) : null;
+    if(tv != null){
+      if(uk !== 'tu') o.conversion_note = o.value + ' ' + u + ' converted to tritium units (1 TU = ' + XP_TU_PCI + ' pCi/L = ' + XP_TU_BQ + ' Bq/L)';
+      const dl = o.detection_limit != null && o.detection_limit !== '' ? toTU(o.detection_limit, o.detection_limit_unit || u) : null;
+      if(dl != null){ o.detection_limit = dl; o.detection_limit_unit = 'TU'; }
+      o.value = tv; o.unit = 'TU'; o.stat_value = tv; o.stat_unit = 'TU';
+    }
     else { o.stat_value = o.value; o.stat_unit = u; }
   }
   if(p.std){
@@ -2798,7 +2829,7 @@ $('xp-go').onclick = async ()=>{
         ['Sources', 'Weaver API = NM Unified Water Data API (mostly NMED Drinking Water Bureau samples, plus NMBGMR, BOR and others). Water Quality Portal = USGS and EPA results. CCR = NMED Drinking Water Watch reports.'],
         ['Public water systems', 'Weaver API drinking-water sites are matched to an NMED source only when the source is at the same location (within ' + XP_DW_MATCH_M + ' m; nearly all are within 2 m, the rounding between the two services) and belongs to a single system. pws_match says how each site was matched or why it was not.'],
         ['Censored results', 'censored "<" means below the limit; value then holds the limit. Some WQP results have no value and no limit; those have a blank value.'],
-        ['Units', 'value and unit are as reported. value_mg_L converts mg/L, µg/L, ppm, ppb and ng/L. Uranium in pCi/L is converted at 0.67 pCi per µg. Nitrate as NO3 is converted to as N. stat_value is what the statistics and standards use: value_mg_L when there is one, otherwise the value in its reported unit, with tritium in tritium units: pCi/L and Bq/L results are converted at 1 TU = ' + XP_TU_PCI + ' pCi/L = ' + XP_TU_BQ + ' Bq/L.'],
+        ['Units', 'value and unit are as reported, except tritium, which is always in tritium units (TU): pCi/L and Bq/L results are converted, and the original is in result_as_reported and conversion_note. value_mg_L converts mg/L, µg/L, ppm, ppb and ng/L. Uranium in pCi/L is converted at 0.67 pCi per µg. Nitrate as NO3 is converted to as N. stat_value is what the statistics and standards use: value_mg_L when there is one, otherwise the value in its reported unit, with tritium in tritium units: pCi/L and Bq/L results are converted at 1 TU = ' + XP_TU_PCI + ' pCi/L = ' + XP_TU_BQ + ' Bq/L.'],
         ['Fraction', 'Dissolved and total results are both included. The Weaver API and CCRs do not report a fraction.'],
         ['Standards', 'EPA drinking water limits. Lead and copper use the action level; TDS, sulfate, chloride, iron, manganese and zinc use the secondary limit. Tritium (20,000 pCi/L, which is 6,270 TU) and strontium-90 (8 pCi/L) use the concentrations EPA derives from the 4 mrem/yr beta/photon MCL. Other added WQP parameters have no standard here. Results from streams and other non-drinking water are compared too, for reference only.'],
         ['Duplicates', 'Removed, and listed on the Removed duplicates sheet with the reason and the row kept instead. Rules, in order: (1) WQP quality-control blanks and spikes (field replicates are kept and labeled in activity_type); (2) the same record repeated inside one source (same site, date, time, value, fraction and method); (3) Weaver API copies of WQP results when the WQP result is in the export; (4) the same parameter, date, value and censoring in two different sources at sites no more than ' + XP_DUP_M + ' m apart. Different sites inside one source are never merged. The kept row is the Water Quality Portal one when there is one, then NMBGMR, BOR, NMED DWB. also_reported_by on the kept row lists the removed copies, and missing fields are filled from them.'],
