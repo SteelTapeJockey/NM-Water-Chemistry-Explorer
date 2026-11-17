@@ -426,11 +426,13 @@
   <div class="modal-card" id="help-card">
     <div class="modal-head"><h3 id="help-title">About the data</h3><div class="spacer"></div><button class="xbtn" id="help-close" aria-label="Close">✕</button></div>
     <div id="help-body">
-      <p>Every well and value comes from the <b>NM Unified Water Data API</b> (OGC API – Features) unless it is tagged <span class="tag-wqp">wqp</span>. On first load the explorer downloads the per-well summary collection for each analyte (<code>nm_&lt;analyte&gt;_summary</code>) and keeps a copy in this browser for 24 hours. Opening a well fetches its full sample history from <code>nm_&lt;analyte&gt;_timeseries</code>.</p>
+      <p>Every well and value comes from the <b>NM Unified Water Data API</b> (OGC API – Features) unless it is tagged <span class="tag-wqp">wqp</span>. On first load the explorer downloads the per-well summary collection for each analyte (<code>nm_&lt;analyte&gt;_summary</code>) and keeps a copy in this browser for 24 hours. Opening a well fetches its full sample history from <code>nm_&lt;analyte&gt;_timeseries</code>. NMBGMR well popups add construction details (formation, depths, casing, completion) and the most recent trace-element and isotope results from NMBGMR's <b>Ocotillo API</b> (<code>water_wells</code>, <code>minor_chemistry_wells</code>). Those results are shown only in the popup; they are not on the map or in exports.</p>
       <h4>Standards used for coloring and exceedance counts</h4>
       <div id="help-std"></div>
       <ul>
-        <li><b>Nitrate</b> is compared on an as-nitrogen basis (10 mg/L). If a source reports nitrate as NO₃, the equivalent limit is about 44 mg/L, so exceedances for that source would be overstated.</li>
+        <li><b>Nitrate</b> is compared on an as-nitrogen basis (10 mg/L). The API serves NMBGMR nitrate converted to nitrate as NO₃ (×4.427), so the explorer converts it back to as N. If another source reports nitrate as NO₃, the equivalent limit is about 44 mg/L, so exceedances for that source would be overstated. The API's own exceedance counts (Color by → exceedances) still compare NMBGMR's NO₃ values with 10 mg/L.</li>
+        <li><b>Non-detects</b> count as 0 in each well's maximum, mean and latest value, for every source: the API does this for NMED DWB, the explorer does it for WQP, and the explorer rebuilds NMBGMR's wells this way because the API counts NMBGMR non-detects at their reporting limit. The sample history shows non-detects as open triangles at the limit.</li>
+        <li><b>Water type, charge balance and the Piper diagram</b> use each well's latest major-ion values only when calcium, magnesium, sodium, bicarbonate, chloride and sulfate were all measured on the same date (potassium and carbonate are included only if measured that day too). Otherwise the well has no water type.</li>
         <li>EPA limits for TDS, sulfate and chloride are <b>secondary</b> (taste, odor, scaling), not health-based. Fluoride uses the 4.0 mg/L primary MCL; the 2.0 mg/L secondary level is not shown.</li>
         <li>NM groundwater standards come from 20.6.2.3103 NMAC. Check them against the current rule before using results in a regulatory context.</li>
       </ul>
@@ -444,9 +446,9 @@
       <h4>Water Quality Portal (WQP tab)</h4>
       <ul>
         <li>The site list comes from WQP's summary service: every New Mexico monitoring location with water-sample results (about 16,000 of the 48,000 registered sites; the rest have none), with result counts by parameter group. It is kept in this browser for 24 hours.</li>
-        <li><b>Downloads</b> follow the same rules as the WQP polygon downloader. Up to 150 sites: one link and WQP builds the file. Up to 1,000: site IDs are sent in batches of 25, and any batch WQP can't finish is split in half and retried. Beyond that: WQP is queried by the area's bounding box, site types and date range in decade pieces, split down to two weeks when slow, and only rows for the selected sites are kept. In Chrome and Edge large downloads are written straight to a file you choose; Stop saves what has arrived.</li>
-        <li>The CSV is WQP's own result table, unchanged, except that when tritium may be in it three columns follow the unit column: <code>TU_Value</code>, <code>TU_DetectionLimit</code> and <code>TU_Note</code> (tritium in tritium units; 1 TU = 3.19 pCi/L = 0.118 Bq/L). Those downloads are fetched by the browser even for 150 sites or fewer. Large downloads ask where to save, starting in Downloads. Unticking a parameter group adds a <code>characteristicType</code> filter.</li>
-        <li><b>Single parameters.</b> The search box and the ▶ lists under each group cover every parameter name with New Mexico water results in WQP (2,189 names as of 2026-11-14, from WQP's period-of-record summaries). WQP files some parameters where you might not look: tritium and carbon-14 are <i>Radiochemical</i>, and the deuterium/hydrogen ratio is <i>Physical</i>, while oxygen-18 is <i>Stable Isotopes</i>. Searching "isotope" finds all of them. Picking a name asks WQP's Station service which sites measured it, kept in this browser for a day. The map and the selection can be limited to those sites, and the download then uses <code>characteristicName</code> filters in place of the groups.</li>
+        <li><b>Downloads</b> go through the browser so each site's details can be added. Up to 1,000 sites: site IDs are sent in batches of 25, and any batch WQP can't finish is split in half and retried. Beyond that: WQP is queried by the area's bounding box, site types and date range in decade pieces, split down to two weeks when slow, and only rows for the selected sites are kept. In Chrome and Edge large downloads are written straight to a file you choose; Stop saves what has arrived.</li>
+        <li>The CSV is WQP's own result table with the site's details added after <code>MonitoringLocationIdentifier</code>: name, type, latitude, longitude, horizontal datum and method, county, HUC-8, elevation and its datum, well and hole depth, aquifer, formation, aquifer type and construction date (from WQP's Station records; WQP's result file carries only the site ID). The Results CSV buttons in site popups give the same file for one site. When tritium may be in the file, three more columns follow the unit column: <code>TU_Value</code>, <code>TU_DetectionLimit</code> and <code>TU_Note</code> (tritium in tritium units; 1 TU = 3.19 pCi/L = 0.118 Bq/L). Large downloads ask where to save, starting in Downloads. Unticking a parameter group adds a <code>characteristicType</code> filter.</li>
+        <li><b>Single parameters.</b> The search box and the ▶ lists under each group cover every parameter name with New Mexico water results in WQP (2,195 names as of 2026-11-14, from WQP's period-of-record summaries). WQP files some parameters where you might not look: tritium and carbon-14 are <i>Radiochemical</i>, and the deuterium/hydrogen ratio is <i>Physical</i>, while oxygen-18 is <i>Stable Isotopes</i>. Searching "isotope" finds all of them. Picking a name asks WQP's Station service which sites measured it, kept in this browser for a day. The map and the selection can be limited to those sites, and the download then uses <code>characteristicName</code> filters in place of the groups.</li>
         <li><b>Reported aquifer.</b> "Load aquifer designations" reads the aquifer and formation WQP lists for every New Mexico well and spring (about 13 MB, kept for a day). Choosing one limits the map, the count and the download to sites listed in it; sites with no designation are left out while a choice is set. This is what the site reports, unlike the Area tab's aquifer, which is a location inside NMBGMR aquifer polygons.</li>
         <li><b>Aquifer and well details.</b> Opening a WQP well or spring fetches its Station record: the local aquifer or formation (for example Santa Fe Group or Ogallala Formation), the principal aquifer, aquifer type, well and hole depth, and construction date. For USGS wells these are the NWIS site-file codes. Other organizations rarely fill them in. USGS wells also get a link to their USGS Water Data page, which shows any water levels.</li>
         <li><b>Adding chemistry to the explorer</b> pulls only the 13 analytes for groundwater sites. A WQP site joins an API well when the API lists it under source <code>WQP</code> with the same ID, or when the USGS site number matches. API values always win. Other sites become wells under the source <code>WQP (direct)</code>. µg/L converts to mg/L, nitrate as NO₃ converts to as-N, results in other units are dropped, and where a site has no bicarbonate, total alkalinity × 1.22 stands in.</li>
@@ -495,8 +497,8 @@ var WQPCore = (function(){
   // WQP CharacteristicName → explorer analyte key ('alk' stands in for bicarbonate where none is reported)
   const CHARS = {
     'Arsenic':'arsenic', 'Uranium':'uranium', 'Fluoride':'fluoride',
-    'Nitrate':'nitrate', 'Nitrate as N':'nitrate', 'Inorganic nitrogen (nitrate and nitrite)':'nitrate',
-    'Inorganic nitrogen (nitrate and nitrite) as N':'nitrate', 'Nitrate + Nitrite':'nitrate',
+    'Nitrate':'nitrate', 'Inorganic nitrogen (nitrate and nitrite)':'nitrate',
+    'Inorganic nitrogen (nitrate and nitrite) ***retired***use Nitrate + Nitrite':'nitrate', 'Nitrate + Nitrite':'nitrate',   // WQP rejects a request with any name it doesn't know, so only names in its list
     'Total dissolved solids':'tds', 'Dissolved solids':'tds',
     'Sulfate':'sulfate', 'Chloride':'chloride', 'Calcium':'calcium', 'Magnesium':'magnesium',
     'Sodium':'sodium', 'Potassium':'potassium', 'Bicarbonate':'bicarbonate', 'Carbonate':'carbonate',
@@ -531,11 +533,16 @@ var WQPCore = (function(){
   }
   // → mg/L (nitrate as N, 'alk' as HCO3); null when the unit can't be converted
   function convert(v, unit, spec, key){
-    const f = unitFactor(unit); if(f == null || !isFinite(v)) return null;
+    if(!isFinite(v)) return null;
+    let f = unitFactor(unit);
+    if(f == null && key === 'uranium' && /^pci\/l/i.test(String(unit||'').trim())) f = 1/0.67/1000;   // EPA: 0.67 pCi per µg of natural uranium
+    if(f == null) return null;
     v *= f;
     const s = (String(unit||'') + ' ' + String(spec||'')).toLowerCase();
     if(key === 'nitrate' && /no3/.test(s) && !/as n\b/.test(s)) v *= 14.007/62.004;
     if(key === 'alk') v *= 61.02/50.04;
+    if(key === 'bicarbonate' && /caco3/.test(s)) v *= 61.017/50.043;   // alkalinity reported as CaCO3
+    if(key === 'calcium' && /caco3/.test(s)) v *= 40.078/100.087;
     return v;
   }
   function stations(text){
@@ -562,6 +569,7 @@ var WQPCore = (function(){
       const ch = r[I.ch], key = CHARS[ch]; if(!key) continue;
       const d = String(r[I.d] || '').slice(0,10); if(!/^\d{4}-\d\d-\d\d$/.test(d)) continue;
       const raw = String(r[I.v] || '').trim(), cond = String(r[I.cond] || '').trim(), unit = r[I.u] || '', spec = I.sp >= 0 ? r[I.sp] : '';
+      if(/contamination/i.test(cond)) continue;   // "Systematic Contamination": the lab flagged the result as unreliable
       const dlRaw = I.dl >= 0 ? r[I.dl] : '', dlu = I.dlu >= 0 ? r[I.dlu] : '';
       let v = null, nd = false;
       if(raw.charAt(0) === '<'){ nd = true; v = convert(parseFloat(raw.slice(1)), unit || dlu, spec, key); }

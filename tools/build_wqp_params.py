@@ -20,7 +20,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 URL = ('https://www.waterqualitydata.us/data/summary/monitoringLocation/search?countycode=US:35:{fips}'
        '&sampleMedia=Water&dataProfile=periodOfRecord&summaryYears=all&mimeType=csv&zip=yes')
-COUNTIES = ['%03d' % n for n in range(1, 62, 2)]   # New Mexico's 33 counties: 001, 003 ... 061 (odd FIPS codes)
+# New Mexico's 33 counties by FIPS code. Mostly odd numbers, but Cibola is 006 and Los Alamos 028.
+COUNTIES = ['001', '003', '005', '006', '007', '009', '011', '013', '015', '017', '019', '021', '023', '025', '027', '028', '029', '031', '033', '035', '037', '039', '041', '043', '045', '047', '049', '051', '053', '055', '057', '059', '061']
 csv.field_size_limit(10**9)
 
 
